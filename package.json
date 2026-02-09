@@ -1,0 +1,29 @@
+{
+  "name": "pickup-api-server",
+  "version": "1.0.0",
+  "description": "External API server connection status checker",
+  "main": "server.js",
+  "scripts": {
+    "build": "cd backend && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "start": "NODE_ENV=production node server.js",
+    "dev": "NODE_ENV=development nodemon server.js",
+    "prestart": "npm run build:backend"
+  },
+  "keywords": [
+    "api",
+    "server",
+    "status"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "ts-node": "^10.9.2"
+  }
+}
