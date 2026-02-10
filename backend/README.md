@@ -166,21 +166,15 @@ print(f"로그인 성공: {result['success']}")
 
 ```bash
 # TypeScript 테스트
-npx ts-node tests/unit/certificate/test-discovery.ts
-npx ts-node tests/unit/certificate/test-password.ts
-npx ts-node tests/unit/test-all.ts
+npx ts-node modules/certificate/tests/test-discovery.ts
+npx ts-node modules/certificate/tests/test-password.ts
+npx ts-node modules/tests/test-all.ts
 
 # Python 테스트
-python tests/unit/certificate/test-infer-metadata.py [인증서경로]
-python tests/unit/certificate/test-parse-without-password.py [인증서경로]
-python tests/unit/certificate/test-parse-with-password.py [인증서경로]
-```
-
-### 통합 테스트
-
-```bash
-# 홈택스 통합 테스트
-node tests/integration/hometax/test-hometax-clients-ref-style.js
+python modules/certificate/tests/test-infer-metadata.py [인증서경로]
+python modules/certificate/tests/test-parse-without-password.py [인증서경로]
+python modules/certificate/tests/test-parse-with-password.py [인증서경로]
+python modules/hometax/tests/test-fetch-cookies.py
 ```
 
 ## 모듈 상태
@@ -197,4 +191,3 @@ node tests/integration/hometax/test-hometax-clients-ref-style.js
 ## 참고 문서
 
 - [최종 성공 보고서](integration/docs/final-success-report.md) - 홈택스 구조 및 구현 완료 사항
-- [리팩토링 계획](REFACTORING_PLAN.md) - 폴더 구조 정리 계획

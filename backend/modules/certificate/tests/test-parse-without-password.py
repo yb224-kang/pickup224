@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 # modules 폴더를 경로에 추가
-modules_path = Path(__file__).parent.parent.parent.parent / 'modules' / 'certificate'
+modules_path = Path(__file__).parent.parent
 sys.path.insert(0, str(modules_path))
 
 import importlib.util
@@ -57,4 +57,5 @@ def test_parse_without_password():
 
 if __name__ == '__main__':
     test_parse_without_password()
+
 

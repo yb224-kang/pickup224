@@ -7,7 +7,7 @@ import {
     saveCertificatePassword,
     getCertificatePassword,
     deleteCertificatePassword
-} from '../../../index';
+} from '../../index';
 
 async function testPassword() {
     console.log('=== 6. 비밀번호 저장/관리 테스트 ===\n');
@@ -69,4 +69,5 @@ async function testPassword() {
 }
 
 testPassword().catch(console.error);
+
 

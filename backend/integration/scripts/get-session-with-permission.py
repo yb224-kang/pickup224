@@ -386,16 +386,40 @@ if __name__ == '__main__':
             spec.loader.exec_module(clients_module)
             fetch_hometax_clients = clients_module.fetch_hometax_clients
             
-            # 수임거래처 조회
+            # 수임거래처 조회 - 수임중과 해지 모두 조회
             # ⭐ txaaAdmNo 전달 (permission.do에서 추출한 값 사용)
             txaa_adm_no = perm_result.get('txaaAdmNo') or ''
-            clients_data = fetch_hometax_clients(
+            
+            # 수임중 거래처 조회
+            clients_active = fetch_hometax_clients(
                 session=session,
                 hometax_admin_code=txaa_adm_no if txaa_adm_no else None,  # ⭐ None 대신 전달
                 engagement_code="1"  # 수임중
             )
+            
+            # 해지 거래처 조회
+            clients_terminated = []
+            try:
+                clients_terminated = fetch_hometax_clients(
+                    session=session,
+                    hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
+                    engagement_code="2"  # 해지
+                )
+            except Exception as e:
+                print(f"[DEBUG Python] 해지 거래처 조회 실패 (계속 진행): {str(e)}", file=sys.stderr)
+            
+            # 상태 정보 추가
+            for client in clients_active:
+                client['_engagementStatus'] = '수임중'
+            
+            for client in clients_terminated:
+                client['_engagementStatus'] = '해지중'
+            
+            # 두 리스트 합치기
+            clients_data = clients_active + clients_terminated
+            
             api_success = True
-            print(f"[DEBUG Python] API 호출 성공: {len(clients_data)}개 거래처 조회", file=sys.stderr)
+            print(f"[DEBUG Python] API 호출 성공: 수임중 {len(clients_active)}개, 해지 {len(clients_terminated)}개 (총 {len(clients_data)}개)", file=sys.stderr)
             
         except Exception as e:
             api_error = str(e)

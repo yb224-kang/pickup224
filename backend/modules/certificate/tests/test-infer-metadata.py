@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 
 # modules 폴더를 경로에 추가
-sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'modules' / 'certificate' / 'metadata'))
+sys.path.insert(0, str(Path(__file__).parent.parent / 'metadata'))
 
 import importlib.util
-spec = importlib.util.spec_from_file_location("infer_metadata_from_file", Path(__file__).parent.parent.parent.parent / 'modules' / 'certificate' / 'metadata' / 'infer.py')
+spec = importlib.util.spec_from_file_location("infer_metadata_from_file", Path(__file__).parent.parent / 'metadata' / 'infer.py')
 infer_metadata_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(infer_metadata_module)
 infer_metadata_from_file = infer_metadata_module.infer_metadata_from_file
@@ -56,4 +56,5 @@ def test_infer_metadata():
 
 if __name__ == '__main__':
     test_infer_metadata()
+
 

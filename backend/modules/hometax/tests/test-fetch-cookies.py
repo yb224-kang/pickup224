@@ -9,7 +9,7 @@ from pathlib import Path
 import importlib.util
 import requests
 
-spec = importlib.util.spec_from_file_location("fetch_additional_cookies", Path(__file__).parent.parent.parent.parent / 'modules' / 'hometax' / 'auth' / 'session.py')
+spec = importlib.util.spec_from_file_location("fetch_additional_cookies", Path(__file__).parent.parent / 'auth' / 'session.py')
 fetch_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fetch_module)
 fetch_additional_cookies = fetch_module.fetch_additional_cookies
@@ -45,4 +45,5 @@ def test_fetch_cookies():
 
 if __name__ == '__main__':
     test_fetch_cookies()
+
 

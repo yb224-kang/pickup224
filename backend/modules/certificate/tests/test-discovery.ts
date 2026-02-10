@@ -6,7 +6,7 @@ import {
     discoverCertificatesBasic,
     discoverCertificatesDetailed,
     CertificateBasicInfo
-} from '../../../index';
+} from '../../index';
 
 async function testDiscovery() {
     console.log('=== 1. 기본 조회 테스트 ===');
@@ -49,4 +49,5 @@ async function testDiscovery() {
 }
 
 testDiscovery().catch(console.error);
+
 

@@ -8,7 +8,7 @@ import getpass
 from pathlib import Path
 
 import importlib.util
-spec = importlib.util.spec_from_file_location("parse_certificate_with_password", Path(__file__).parent.parent.parent.parent / 'modules' / 'certificate' / 'parsing' / 'with-password.py')
+spec = importlib.util.spec_from_file_location("parse_certificate_with_password", Path(__file__).parent.parent / 'parsing' / 'with-password.py')
 parse_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parse_module)
 parse_certificate_with_password = parse_module.parse_certificate_with_password
@@ -62,4 +62,5 @@ def test_parse_with_password():
 
 if __name__ == '__main__':
     test_parse_with_password()
+
 

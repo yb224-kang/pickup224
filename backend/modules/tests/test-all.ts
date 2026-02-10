@@ -45,10 +45,10 @@ async function testAll() {
     console.log('\n' + '='.repeat(50));
     console.log('\n✅ TypeScript 모듈 테스트 완료');
     console.log('\n📝 Python 모듈 테스트는 별도로 실행하세요:');
-    console.log('   python tests/test-infer-metadata.py [인증서경로]');
-    console.log('   python tests/test-parse-without-password.py [인증서경로]');
-    console.log('   python tests/test-parse-with-password.py [인증서경로]');
-    console.log('   python tests/test-fetch-cookies.py');
+    console.log('   python modules/certificate/tests/test-infer-metadata.py [인증서경로]');
+    console.log('   python modules/certificate/tests/test-parse-without-password.py [인증서경로]');
+    console.log('   python modules/certificate/tests/test-parse-with-password.py [인증서경로]');
+    console.log('   python modules/hometax/tests/test-fetch-cookies.py');
 }
 
 testAll().catch(console.error);
