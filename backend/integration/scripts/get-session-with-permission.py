@@ -233,6 +233,10 @@ if __name__ == '__main__':
     cert_path = sys.argv[1]
     password = sys.argv[2]
     
+def get_hometax_session(cert_path, password):
+    """
+    인증서로 로그인하고 홈택스 세션을 활성화하여 반환합니다.
+    """
     try:
         # 1. 로그인
         result = login_with_certificate(
@@ -255,7 +259,6 @@ if __name__ == '__main__':
             )
             main_perm_text = main_perm_response.text
             print(f"[DEBUG Python] 메인 도메인 permission.do 응답 길이: {len(main_perm_text)}", file=sys.stderr)
-            print(f"[DEBUG Python] 메인 도메인 permission.do 응답 처음 500자: {main_perm_text[:500]}", file=sys.stderr)
             
             # 메인 도메인에서 txaaAdmNo 추출 시도
             main_txaa_adm_no = ''
@@ -340,7 +343,6 @@ if __name__ == '__main__':
                     timeout=20
                 )
                 print(f"[DEBUG Python] 서브도메인 세션 활성화 주입 완료 (상태 코드: {teht_perm_2.status_code})", file=sys.stderr)
-                print(f"[DEBUG Python] 응답: {teht_perm_2.text[:200]}", file=sys.stderr)
             except Exception as e:
                 print(f"[DEBUG Python] 서브도메인 세션 활성화 주입 실패: {str(e)}", file=sys.stderr)
         
@@ -355,101 +357,114 @@ if __name__ == '__main__':
         if not perm_result.get('success'):
             # permission.do 실패 시에도 쿠키는 반환
             final_cookies = {cookie.name: cookie.value for cookie in session.cookies}
-            output = {
+            return {
                 'success': True,
+                'session': session, # ⭐ Session 객체 반환
                 'cookies': final_cookies,
                 'pubcUserNo': result.get('pubcUserNo') or '',
                 'tin': result.get('tin') or '',
-                'txaaAdmNo': perm_result.get('txaaAdmNo') or '',  # ⭐ 추가
+                'txaaAdmNo': perm_result.get('txaaAdmNo') or '',
                 'charId': result.get('charId') or '',
                 'userType': result.get('userType') or '',
                 'permissionSuccess': False,
                 'permissionError': perm_result.get('error', 'Unknown error'),
             }
-            print(json.dumps(output, ensure_ascii=False))
-            sys.exit(0)
         
         # 3. permission.do 성공 후 최종 쿠키 추출
         final_cookies = {cookie.name: cookie.value for cookie in session.cookies}
         
-        # 4. (선택적) API 호출 테스트 - Python에서 직접 시도
-        api_success = False
-        api_error = None
-        clients_data = []
-        
-        try:
-            # modules/hometax/clients/fetch.py의 fetch_hometax_clients 함수 사용
-            import importlib.util
-            clients_module_path = Path(__file__).parent.parent.parent / 'modules' / 'hometax' / 'clients' / 'fetch.py'
-            spec = importlib.util.spec_from_file_location("fetch_hometax_clients", clients_module_path)
-            clients_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(clients_module)
-            fetch_hometax_clients = clients_module.fetch_hometax_clients
-            
-            # 수임거래처 조회 - 수임중과 해지 모두 조회
-            # ⭐ txaaAdmNo 전달 (permission.do에서 추출한 값 사용)
-            txaa_adm_no = perm_result.get('txaaAdmNo') or ''
-            
-            # 수임중 거래처 조회
-            clients_active = fetch_hometax_clients(
-                session=session,
-                hometax_admin_code=txaa_adm_no if txaa_adm_no else None,  # ⭐ None 대신 전달
-                engagement_code="1"  # 수임중
-            )
-            
-            # 해지 거래처 조회
-            clients_terminated = []
-            try:
-                clients_terminated = fetch_hometax_clients(
-                    session=session,
-                    hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
-                    engagement_code="2"  # 해지
-                )
-            except Exception as e:
-                print(f"[DEBUG Python] 해지 거래처 조회 실패 (계속 진행): {str(e)}", file=sys.stderr)
-            
-            # 상태 정보 추가
-            for client in clients_active:
-                client['_engagementStatus'] = '수임중'
-            
-            for client in clients_terminated:
-                client['_engagementStatus'] = '해지중'
-            
-            # 두 리스트 합치기
-            clients_data = clients_active + clients_terminated
-            
-            api_success = True
-            print(f"[DEBUG Python] API 호출 성공: 수임중 {len(clients_active)}개, 해지 {len(clients_terminated)}개 (총 {len(clients_data)}개)", file=sys.stderr)
-            
-        except Exception as e:
-            api_error = str(e)
-            import traceback
-            print(f"[DEBUG Python] API 호출 실패: {str(e)}", file=sys.stderr)
-            print(f"[DEBUG Python] {traceback.format_exc()}", file=sys.stderr)
-        
-        # 5. 결과 통합
-        output = {
+        return {
             'success': True,
+            'session': session, # ⭐ Session 객체 반환
             'cookies': final_cookies,
             'pubcUserNo': perm_result.get('pubcUserNo') or result.get('pubcUserNo') or '',
             'tin': perm_result.get('tin') or result.get('tin') or '',
-            'txaaAdmNo': perm_result.get('txaaAdmNo') or '',  # ⭐ 추가
+            'txaaAdmNo': perm_result.get('txaaAdmNo') or '',
             'charId': result.get('charId') or '',
             'userType': result.get('userType') or '',
             'permissionSuccess': perm_result.get('success', False),
-            'apiSuccess': api_success,
-            'apiError': api_error,
-            'clients': clients_data if api_success else [],
+            'apiSuccess': False, # get_hometax_session에서는 API 호출 안 함
+            'apiError': None,
+            'clients': [],
         }
-        
-        if not perm_result.get('success'):
-            output['permissionError'] = perm_result.get('error', 'Unknown error')
-        
-        print(json.dumps(output, ensure_ascii=False))
         
     except Exception as e:
         import traceback
-        error_msg = f"{str(e)}\n{traceback.format_exc()}"
-        print(json.dumps({'error': error_msg}))
+        return {
+            'success': False,
+            'error': f"{str(e)}\n{traceback.format_exc()}"
+        }
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3:
+        print(json.dumps({'error': 'Usage: python get-session-with-permission.py <cert_path> <password>'}))
         sys.exit(1)
+    
+    cert_path = sys.argv[1]
+    password = sys.argv[2]
+    
+    result = get_hometax_session(cert_path, password)
+    
+    if not result['success']:
+        print(json.dumps(result))
+        sys.exit(1)
+        
+    # 4. (선택적) API 호출 테스트 - Python에서 직접 시도 (기존 로직 유지)
+    session = result['session']
+    api_success = False
+    api_error = None
+    clients_data = []
+    
+    try:
+        # modules/hometax/clients/fetch.py의 fetch_hometax_clients 함수 사용
+        import importlib.util
+        clients_module_path = Path(__file__).parent.parent.parent / 'modules' / 'hometax' / 'clients' / 'fetch.py'
+        spec = importlib.util.spec_from_file_location("fetch_hometax_clients", clients_module_path)
+        clients_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(clients_module)
+        fetch_hometax_clients = clients_module.fetch_hometax_clients
+        
+        # 수임거래처 조회
+        txaa_adm_no = result.get('txaaAdmNo') or ''
+        
+        # 수임중 거래처 조회
+        clients_active = fetch_hometax_clients(
+            session=session,
+            hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
+            engagement_code="1"
+        )
+        
+        # 해지 거래처 조회
+        clients_terminated = []
+        try:
+            clients_terminated = fetch_hometax_clients(
+                session=session,
+                hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
+                engagement_code="2"
+            )
+        except Exception as e:
+            print(f"[DEBUG Python] 해지 거래처 조회 실패 (계속 진행): {str(e)}", file=sys.stderr)
+        
+        for client in clients_active: client['_engagementStatus'] = '수임중'
+        for client in clients_terminated: client['_engagementStatus'] = '해지중'
+        
+        clients_data = clients_active + clients_terminated
+        api_success = True
+        print(f"[DEBUG Python] API 호출 성공: 총 {len(clients_data)}개", file=sys.stderr)
+        
+    except Exception as e:
+        api_error = str(e)
+        import traceback
+        print(f"[DEBUG Python] API 호출 실패: {str(e)}", file=sys.stderr)
+        print(f"[DEBUG Python] {traceback.format_exc()}", file=sys.stderr)
+    
+    # 결과 통합 (Session 객체는 JSON 직렬화 불가하므로 제거)
+    if 'session' in result:
+        del result['session']
+        
+    result['apiSuccess'] = api_success
+    result['apiError'] = api_error
+    result['clients'] = clients_data if api_success else []
+    
+    print(json.dumps(result, ensure_ascii=False))
 
