@@ -424,31 +424,70 @@ if __name__ == '__main__':
         spec.loader.exec_module(clients_module)
         fetch_hometax_clients = clients_module.fetch_hometax_clients
         
-        # 수임거래처 조회
+        # 수임거래처 조회 (수임중/해지 구분 없이 전체 조회)
         txaa_adm_no = result.get('txaaAdmNo') or ''
         
-        # 수임중 거래처 조회
-        clients_active = fetch_hometax_clients(
-            session=session,
-            hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
-            engagement_code="1"
-        )
-        
-        # 해지 거래처 조회
-        clients_terminated = []
+        # 전체 거래처 조회 (engagement_code를 빈 문자열로 시도)
+        clients_data = []
         try:
-            clients_terminated = fetch_hometax_clients(
+            # 먼저 빈 문자열로 전체 조회 시도
+            clients_data = fetch_hometax_clients(
                 session=session,
                 hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
-                engagement_code="2"
+                engagement_code=""  # 빈 문자열로 전체 조회 시도
             )
+            print(f"[DEBUG Python] 전체 거래처 조회 성공: {len(clients_data)}개", file=sys.stderr)
         except Exception as e:
-            print(f"[DEBUG Python] 해지 거래처 조회 실패 (계속 진행): {str(e)}", file=sys.stderr)
+            print(f"[DEBUG Python] 전체 조회 실패, 수임중/해지/미동의 각각 조회 시도: {str(e)}", file=sys.stderr)
+            # 전체 조회 실패 시 수임중/해지/미동의를 각각 조회
+            try:
+                clients_active = fetch_hometax_clients(
+                    session=session,
+                    hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
+                    engagement_code="1"
+                )
+                for client in clients_active: 
+                    client['_engagementStatus'] = '수임중'
+                clients_data.extend(clients_active)
+                print(f"[DEBUG Python] 수임중 거래처 조회: {len(clients_active)}개", file=sys.stderr)
+            except Exception as e2:
+                print(f"[DEBUG Python] 수임중 거래처 조회 실패: {str(e2)}", file=sys.stderr)
+            
+            try:
+                clients_terminated = fetch_hometax_clients(
+                    session=session,
+                    hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
+                    engagement_code="2"
+                )
+                for client in clients_terminated: 
+                    client['_engagementStatus'] = '해지중'
+                clients_data.extend(clients_terminated)
+                print(f"[DEBUG Python] 해지 거래처 조회: {len(clients_terminated)}개", file=sys.stderr)
+            except Exception as e3:
+                print(f"[DEBUG Python] 해지 거래처 조회 실패: {str(e3)}", file=sys.stderr)
+            
+            # 미동의 상태 조회 추가
+            try:
+                clients_pending = fetch_hometax_clients(
+                    session=session,
+                    hometax_admin_code=txaa_adm_no if txaa_adm_no else None,
+                    engagement_code="3"
+                )
+                for client in clients_pending: 
+                    client['_engagementStatus'] = '미동의'
+                clients_data.extend(clients_pending)
+                print(f"[DEBUG Python] 미동의 거래처 조회: {len(clients_pending)}개", file=sys.stderr)
+            except Exception as e4:
+                print(f"[DEBUG Python] 미동의 거래처 조회 실패: {str(e4)}", file=sys.stderr)
         
-        for client in clients_active: client['_engagementStatus'] = '수임중'
-        for client in clients_terminated: client['_engagementStatus'] = '해지중'
-        
-        clients_data = clients_active + clients_terminated
+        # _engagementStatus가 없는 경우 기본값 설정
+        for client in clients_data:
+            if '_engagementStatus' not in client:
+                # 원본 데이터에서 상태 확인
+                if client.get('ofbDt'):  # 해지일이 있으면 해지중
+                    client['_engagementStatus'] = '해지중'
+                else:
+                    client['_engagementStatus'] = '수임중'
         api_success = True
         print(f"[DEBUG Python] API 호출 성공: 총 {len(clients_data)}개", file=sys.stderr)
         

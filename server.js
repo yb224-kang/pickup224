@@ -24,11 +24,15 @@ try {
   }
 } catch (error) {
   // 개발: TypeScript 파일 직접 사용 (ts-node가 처리)
+  console.log('[DEBUG] dist/index 로드 실패, TypeScript 파일 시도:', error.message);
   backendModule = require('./backend/index');
   if (isDevelopment) {
     console.log('[Development] TypeScript 파일 직접 사용');
   }
 }
+
+// 디버깅: backendModule 내용 확인
+console.log('[DEBUG] backendModule keys:', Object.keys(backendModule || {}));
 
 const {
   discoverCertificatesBasic,
@@ -36,8 +40,38 @@ const {
   saveCertificatePassword,
   getCertificatePassword,
   deleteCertificatePassword,
-  listSavedCertificates
+  listSavedCertificates,
+  getCertPathByHash,
+  saveTaxAccountant,
+  getTaxAccountant,
+  listTaxAccountants,
+  updateTaxAccountant,
+  deleteTaxAccountant,
+  linkCertificate,
+  saveCompany,
+  saveCompanies,
+  getCompany,
+  listCompanies,
+  updateCompany,
+  deleteCompany
 } = backendModule;
+
+// 디버깅: 세무사 모듈 로드 확인
+console.log('[DEBUG] 세무사 모듈 확인:', {
+  listTaxAccountants: typeof listTaxAccountants,
+  saveTaxAccountant: typeof saveTaxAccountant,
+  getTaxAccountant: typeof getTaxAccountant,
+  updateTaxAccountant: typeof updateTaxAccountant,
+  deleteTaxAccountant: typeof deleteTaxAccountant,
+  linkCertificate: typeof linkCertificate,
+});
+
+// 디버깅: backendModule에서 직접 확인
+if (backendModule) {
+  console.log('[DEBUG] backendModule.listTaxAccountants:', typeof backendModule.listTaxAccountants);
+  console.log('[DEBUG] backendModule에 있는 세무사 관련 함수:', 
+    Object.keys(backendModule).filter(key => key.includes('Tax') || key.includes('tax')));
+}
 
 // Python 모듈 import (유효기간 파싱용)
 let parseCertificateWithoutPassword;
@@ -568,6 +602,551 @@ app.get('/api/certificates/saved', async (req, res) => {
       success: false,
       data: null,
       message: '저장된 인증서 목록 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// ========== 세무사 관리 API ==========
+
+// 세무사 목록 조회
+app.get('/api/tax-accountants', async (req, res) => {
+  try {
+    // 디버깅: 함수 존재 확인
+    if (typeof listTaxAccountants !== 'function') {
+      console.error('[ERROR] listTaxAccountants is not a function:', typeof listTaxAccountants);
+      return res.status(500).json({
+        success: false,
+        data: null,
+        message: 'listTaxAccountants 함수를 찾을 수 없습니다.',
+        error: `listTaxAccountants type: ${typeof listTaxAccountants}`,
+      });
+    }
+    
+    console.log('[DEBUG] listTaxAccountants 호출 시작');
+    const taxAccountants = await listTaxAccountants();
+    console.log('[DEBUG] listTaxAccountants 결과:', taxAccountants?.length || 0, '개');
+    
+    res.json({
+      success: true,
+      data: taxAccountants,
+      message: '세무사 목록 조회 성공',
+    });
+  } catch (error) {
+    console.error('[ERROR] 세무사 목록 조회 오류:', error);
+    console.error('[ERROR] 에러 메시지:', error.message);
+    console.error('[ERROR] 스택 트레이스:', error.stack);
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '세무사 목록 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 세무사 상세 조회
+app.get('/api/tax-accountants/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const taxAccountant = await getTaxAccountant(id);
+    
+    if (!taxAccountant) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: taxAccountant,
+      message: '세무사 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '세무사 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 세무사 등록
+app.post('/api/tax-accountants', async (req, res) => {
+  try {
+    const { name, representative, certificateHash, certificatePath, status, autoSync, metadata } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사명은 필수입니다.',
+      });
+    }
+    
+    const taxAccountant = await saveTaxAccountant({
+      name,
+      representative,
+      certificateHash,
+      certificatePath,
+      status: status || 'connected',
+      connectedAt: status === 'connected' || !status ? new Date().toISOString() : undefined,
+      autoSync: autoSync !== undefined ? autoSync : false,
+      metadata,
+    });
+    
+    res.json({
+      success: true,
+      data: taxAccountant,
+      message: '세무사가 등록되었습니다.',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '세무사 등록 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 세무사 정보 수정
+app.put('/api/tax-accountants/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, representative, certificateHash, certificatePath, status, autoSync, metadata } = req.body;
+    
+    const updated = await updateTaxAccountant(id, {
+      name,
+      representative,
+      certificateHash,
+      certificatePath,
+      status,
+      autoSync,
+      metadata,
+    });
+    
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: updated,
+      message: '세무사 정보가 수정되었습니다.',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '세무사 정보 수정 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 세무사 삭제
+app.delete('/api/tax-accountants/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await deleteTaxAccountant(id);
+    
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: '세무사가 삭제되었습니다.',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: '세무사 삭제 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 인증서 연동
+app.post('/api/tax-accountants/:id/link-certificate', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { certificateHash, certificatePath } = req.body;
+    
+    if (!certificateHash) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '인증서 해시는 필수입니다.',
+      });
+    }
+    
+    // 인증서 경로 조회 (certificateHash로)
+    let finalCertPath = certificatePath;
+    if (!finalCertPath) {
+      const { getCertPathByHash } = require('./backend/modules/certificate/password/storage');
+      finalCertPath = await getCertPathByHash(certificateHash) || undefined;
+    }
+    
+    const updated = await linkCertificate(id, certificateHash, finalCertPath);
+    
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: updated,
+      message: '인증서가 연동되었습니다.',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '인증서 연동 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// ========== 거래처(사업장) 관리 API ==========
+
+// 거래처 목록 조회
+app.get('/api/companies', async (req, res) => {
+  try {
+    const { taxAccountantId } = req.query;
+    const companies = await listCompanies(taxAccountantId || undefined);
+    res.json({
+      success: true,
+      data: companies,
+      message: '거래처 목록 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '거래처 목록 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 거래처 상세 조회
+app.get('/api/companies/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company = await getCompany(id);
+    
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '거래처를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: company,
+      message: '거래처 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '거래처 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 선택된 세무사의 홈택스 거래처 조회 및 저장
+app.post('/api/companies/fetch-from-hometax', async (req, res) => {
+  try {
+    const { taxAccountantId } = req.body;
+    
+    if (!taxAccountantId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사 ID는 필수입니다.',
+      });
+    }
+    
+    // 세무사 정보 조회
+    const taxAccountant = await getTaxAccountant(taxAccountantId);
+    if (!taxAccountant) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    // 인증서 정보 확인
+    if (!taxAccountant.certificateHash) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사에 연동된 인증서가 없습니다.',
+      });
+    }
+    
+    // 인증서 경로 및 비밀번호 조회
+    const certPath = taxAccountant.certificatePath || await getCertPathByHash(taxAccountant.certificateHash);
+    if (!certPath) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '인증서 경로를 찾을 수 없습니다.',
+      });
+    }
+    
+    const password = await getCertificatePassword(certPath);
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '인증서 비밀번호를 찾을 수 없습니다.',
+      });
+    }
+    
+    // Python 스크립트 실행 (get-session-with-permission.py)
+    const { spawn } = require('child_process');
+    const path = require('path');
+    const pythonScriptPath = path.join(__dirname, 'backend', 'integration', 'scripts', 'get-session-with-permission.py');
+    
+    const result = await new Promise((resolve, reject) => {
+      const python = spawn('python3', [
+        pythonScriptPath,
+        certPath,
+        password
+      ], {
+        env: {
+          ...process.env,
+          AXCEL_ENCRYPTION_KEY: process.env.AXCEL_ENCRYPTION_KEY || '',
+        }
+      });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      python.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+      
+      python.stderr.on('data', (data) => {
+        stderr += data.toString();
+        console.log(`[Python] ${data.toString().trim()}`);
+      });
+      
+      python.on('close', (code) => {
+        if (code === 0 && stdout.trim()) {
+          try {
+            // JSON 부분만 추출
+            const jsonStart = stdout.indexOf('{');
+            const jsonEnd = stdout.lastIndexOf('}') + 1;
+            if (jsonStart >= 0 && jsonEnd > jsonStart) {
+              const jsonStr = stdout.substring(jsonStart, jsonEnd);
+              const parsed = JSON.parse(jsonStr);
+              resolve(parsed);
+            } else {
+              reject(new Error('JSON 응답을 찾을 수 없습니다.'));
+            }
+          } catch (e) {
+            reject(new Error(`JSON 파싱 실패: ${e.message}\n출력: ${stdout.substring(0, 500)}`));
+          }
+        } else {
+          reject(new Error(`Python 스크립트 실패 (코드: ${code})\n${stderr || '알 수 없는 오류'}`));
+        }
+      });
+    });
+    
+    // 거래처 데이터 확인
+    console.log(`[server.js] API 응답 확인: apiSuccess=${result.apiSuccess}, clients=${result.clients?.length || 0}개`);
+    if (!result.apiSuccess || !result.clients || result.clients.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        message: result.apiError || '조회된 거래처가 없습니다.',
+        meta: {
+          taxAccountantId,
+          taxAccountantName: taxAccountant.name,
+          fetchedCount: 0,
+        }
+      });
+    }
+    
+    // 홈택스 거래처 데이터를 Company 형식으로 변환
+    console.log(`[server.js] 조회된 거래처 수: ${result.clients?.length || 0}개`);
+    const companies = result.clients.map((client) => {
+      const name = client.fnm || client.tnmNm || client.거래처명 || client.name || '거래처명 없음';
+      const businessNumber = client.bsno || client.clntbsno || client.사업자번호 || '';
+      const representative = client.txprNm || client.대표자명 || '';
+      const address = client.주소 || client.address || '';
+      const phone = client.전화번호 || client.phone || '';
+      
+      return {
+        name,
+        businessNumber: businessNumber.replace(/-/g, ''),
+        ceoName: representative,
+        address,
+        phone,
+        email: client.이메일 || client.email || '',
+        industry: client.업종 || '',
+        employeeCount: 0,
+        taxAccountantId: taxAccountantId,
+        _engagementStatus: client._engagementStatus || '수임중',
+        _originalData: client,
+      };
+    });
+    
+    console.log(`[server.js] 변환된 거래처 수: ${companies.length}개`);
+    console.log(`[server.js] saveCompanies 호출 전`);
+    
+    // 거래처 저장 (재조회 시 업데이트 옵션 활성화)
+    let savedCompanies = [];
+    try {
+      savedCompanies = await saveCompanies(companies, {
+        updateExisting: true // 기존 거래처 업데이트
+      });
+      console.log(`[server.js] saveCompanies 반환: ${savedCompanies.length}개`);
+      
+      // 저장된 개수와 조회된 개수 비교
+      if (savedCompanies.length !== companies.length) {
+        const missing = companies.length - savedCompanies.length;
+        console.warn(`[server.js] ⚠️ 경고: 조회된 거래처 ${companies.length}개 중 ${savedCompanies.length}개만 저장되었습니다. (누락: ${missing}개)`);
+        console.warn(`[server.js] 세무사: ${taxAccountant.name} (ID: ${taxAccountantId})`);
+        
+        // 누락된 거래처 정보 출력 (처음 5개만)
+        const savedBizNos = new Set(savedCompanies.map(c => c.businessNumber || c._originalData?.bsno || '').filter(Boolean));
+        const missingCompanies = companies.filter(c => {
+          const bizNo = c.businessNumber || c._originalData?.bsno || '';
+          return bizNo && !savedBizNos.has(bizNo);
+        }).slice(0, 5);
+        
+        if (missingCompanies.length > 0) {
+          console.warn(`[server.js] 누락된 거래처 예시 (최대 5개):`);
+          missingCompanies.forEach(c => {
+            const name = c.name || c._originalData?.tnmNm || '이름 없음';
+            const bizNo = c.businessNumber || c._originalData?.bsno || '사업자번호 없음';
+            const resno = c._originalData?.resno || '주민번호 없음';
+            console.warn(`  - ${name} (사업자번호: ${bizNo}, 주민번호: ${resno})`);
+          });
+        }
+      }
+    } catch (error) {
+      console.error(`[server.js] saveCompanies 오류:`, error);
+      // 일부는 저장되었을 수 있으므로 에러를 전파하지 않고 경고만 출력
+      // 하지만 클라이언트에는 저장된 개수만 반환
+    }
+    
+    // 통계 계산 (신규 vs 업데이트)
+    let newCount = 0;
+    let updatedCount = 0;
+    
+    savedCompanies.forEach(company => {
+      // createdAt과 updatedAt이 같으면 신규, 다르면 업데이트
+      if (company.createdAt === company.updatedAt) {
+        newCount++;
+      } else {
+        updatedCount++;
+      }
+    });
+    
+    res.json({
+      success: true,
+      data: savedCompanies,
+      message: `${savedCompanies.length}개 거래처가 조회되어 저장되었습니다. (신규: ${newCount}개, 업데이트: ${updatedCount}개)`,
+      meta: {
+        taxAccountantId,
+        taxAccountantName: taxAccountant.name,
+        fetchedCount: savedCompanies.length,
+        stats: {
+          new: newCount,
+          updated: updatedCount,
+          total: savedCompanies.length
+        }
+      }
+    });
+  } catch (error) {
+    console.error('[ERROR] 거래처 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '거래처 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 거래처 정보 수정
+app.put('/api/companies/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = req.body;
+    
+    const updated = await updateCompany(id, updateData);
+    
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '거래처를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: updated,
+      message: '거래처 정보가 수정되었습니다.',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '거래처 정보 수정 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 거래처 삭제
+app.delete('/api/companies/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await deleteCompany(id);
+    
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: '거래처를 찾을 수 없습니다.',
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: '거래처가 삭제되었습니다.',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: '거래처 삭제 중 오류가 발생했습니다.',
       error: error.message,
     });
   }

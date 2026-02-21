@@ -6,8 +6,8 @@
   "scripts": {
     "build": "cd backend && npm run build",
     "build:backend": "cd backend && npm run build",
-    "start": "NODE_ENV=production node server.js",
-    "dev": "NODE_ENV=development nodemon server.js",
+    "start": "NODE_ENV=production node backend/server.js",
+    "dev": "NODE_ENV=development nodemon backend/server.js",
     "prestart": "npm run build:backend"
   },
   "keywords": [

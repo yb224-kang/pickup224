@@ -1,0 +1,41 @@
+{
+  "engagement_stats": {
+    "수임중": {
+      "total": 466,
+      "success": 224,
+      "failed": 242,
+      "no_biz_no": 0,
+      "not_queried": 0
+    },
+    "해지중": {
+      "total": 170,
+      "success": 16,
+      "failed": 154,
+      "no_biz_no": 0,
+      "not_queried": 0
+    },
+    "알수없음": {
+      "total": 0,
+      "success": 0,
+      "failed": 0,
+      "no_biz_no": 0,
+      "not_queried": 0
+    }
+  },
+  "summary": {
+    "수임중": {
+      "total": 466,
+      "success": 224,
+      "failed": 242,
+      "success_rate": 48.06866952789699,
+      "failed_rate": 51.931330472103
+    },
+    "해지중": {
+      "total": 170,
+      "success": 16,
+      "failed": 154,
+      "success_rate": 9.411764705882353,
+      "failed_rate": 90.58823529411765
+    }
+  }
+}
