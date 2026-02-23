@@ -7,7 +7,7 @@
     "build": "cd backend && npm run build",
     "build:backend": "cd backend && npm run build",
     "start": "NODE_ENV=production node backend/server.js",
-    "dev": "NODE_ENV=development nodemon backend/server.js",
+    "dev": "NODE_ENV=development nodemon server.js",
     "prestart": "npm run build:backend"
   },
   "keywords": [
@@ -18,9 +18,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@date-fns/tz": "^1.4.1",
     "axios": "^1.6.0",
+    "axios-cookiejar-support": "^6.0.5",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "date-fns": "^4.1.0",
+    "express": "^4.18.2",
+    "tough-cookie": "^6.0.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "nodemon": "^3.0.1",

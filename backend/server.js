@@ -39,17 +39,6 @@ const {
     listSavedCertificates
 } = backendModule;
 
-// Python 모듈 import (유효기간 파싱용)
-let parseCertificateWithoutPassword;
-let inferMetadataFromFile;
-try {
-    const pythonModules = require('./modules/__init__.py');
-    parseCertificateWithoutPassword = pythonModules.parse_certificate_without_password;
-    inferMetadataFromFile = pythonModules.infer_metadata_from_file;
-} catch (error) {
-    console.warn('[Warning] Python 모듈 로드 실패, 유효기간 파싱이 제한될 수 있습니다:', error.message);
-}
-
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');

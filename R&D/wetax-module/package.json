@@ -1,0 +1,41 @@
+{
+  "name": "@your-org/wetax-module",
+  "version": "1.0.0",
+  "description": "위택스 자동로그인 및 수집 모듈",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "wetax",
+    "tax",
+    "scraper",
+    "automation"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@date-fns/tz": "^1.4.1",
+    "axios": "^1.13.2",
+    "axios-cookiejar-support": "^6.0.4",
+    "date-fns": "^4.1.0",
+    "playwright": "^1.56.1",
+    "tough-cookie": "^5.1.2",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.13",
+    "@types/tough-cookie": "^4.3.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "playwright": "^1.56.1"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}
+

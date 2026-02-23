@@ -53,7 +53,20 @@ const {
   getCompany,
   listCompanies,
   updateCompany,
-  deleteCompany
+  deleteCompany,
+  WetaxClientFetcher,
+  WetaxReportCollector,
+  saveWetaxCompanies,
+  listWetaxCompanies,
+  saveWithholdingReports,
+  listWithholdingReports,
+  getWithholdingTaxKPI,
+  getCompanyWithholdingStats,
+  getTaxpayersByFilter,
+  startRun,
+  completeRun,
+  listRuns,
+  saveRawSnapshot
 } = backendModule;
 
 // 디버깅: 세무사 모듈 로드 확인
@@ -71,17 +84,6 @@ if (backendModule) {
   console.log('[DEBUG] backendModule.listTaxAccountants:', typeof backendModule.listTaxAccountants);
   console.log('[DEBUG] backendModule에 있는 세무사 관련 함수:', 
     Object.keys(backendModule).filter(key => key.includes('Tax') || key.includes('tax')));
-}
-
-// Python 모듈 import (유효기간 파싱용)
-let parseCertificateWithoutPassword;
-let inferMetadataFromFile;
-try {
-  const pythonModules = require('./backend/modules/__init__.py');
-  parseCertificateWithoutPassword = pythonModules.parse_certificate_without_password;
-  inferMetadataFromFile = pythonModules.infer_metadata_from_file;
-} catch (error) {
-  console.warn('[Warning] Python 모듈 로드 실패, 유효기간 파싱이 제한될 수 있습니다:', error.message);
 }
 
 const express = require('express');
@@ -877,6 +879,8 @@ app.get('/api/companies/:id', async (req, res) => {
 
 // 선택된 세무사의 홈택스 거래처 조회 및 저장
 app.post('/api/companies/fetch-from-hometax', async (req, res) => {
+  let run = null;
+  console.log(`[server.js] ✅ 거래처 조회 요청 수신: taxAccountantId=${req.body?.taxAccountantId}`);
   try {
     const { taxAccountantId } = req.body;
     
@@ -888,7 +892,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       });
     }
     
-    // 세무사 정보 조회
+    // 세무사 정보 조회 (검증 먼저)
     const taxAccountant = await getTaxAccountant(taxAccountantId);
     if (!taxAccountant) {
       return res.status(404).json({
@@ -905,6 +909,13 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         data: null,
         message: '세무사에 연동된 인증서가 없습니다.',
       });
+    }
+    
+    // ✅ 검증 완료 후 Run 시작
+    if (startRun) {
+      run = startRun({ source: 'hometax', type: 'clients', taxAccountantId });
+    } else {
+      console.warn('[server.js] startRun 함수를 찾을 수 없습니다. Raw 저장을 건너뜁니다.');
     }
     
     // 인증서 경로 및 비밀번호 조회
@@ -931,6 +942,9 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
     const path = require('path');
     const pythonScriptPath = path.join(__dirname, 'backend', 'integration', 'scripts', 'get-session-with-permission.py');
     
+    console.log(`[server.js] 🔄 Python 스크립트 실행 시작: ${pythonScriptPath}`);
+    console.log(`[server.js] 인증서 경로: ${certPath}`);
+    
     const result = await new Promise((resolve, reject) => {
       const python = spawn('python3', [
         pythonScriptPath,
@@ -946,6 +960,12 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       let stdout = '';
       let stderr = '';
       
+      // 타임아웃 설정 (5분)
+      const timeout = setTimeout(() => {
+        python.kill('SIGTERM');
+        reject(new Error('Python 스크립트 실행 시간 초과 (5분)'));
+      }, 5 * 60 * 1000);
+      
       python.stdout.on('data', (data) => {
         stdout += data.toString();
       });
@@ -956,6 +976,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       });
       
       python.on('close', (code) => {
+        clearTimeout(timeout);
         if (code === 0 && stdout.trim()) {
           try {
             // JSON 부분만 추출
@@ -975,11 +996,45 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
           reject(new Error(`Python 스크립트 실패 (코드: ${code})\n${stderr || '알 수 없는 오류'}`));
         }
       });
+      
+      python.on('error', (error) => {
+        clearTimeout(timeout);
+        console.error(`[server.js] ❌ Python 프로세스 오류:`, error);
+        reject(new Error(`Python 스크립트 실행 실패: ${error.message}`));
+      });
     });
     
+    console.log(`[server.js] ✅ Python 스크립트 실행 완료`);
     // 거래처 데이터 확인
     console.log(`[server.js] API 응답 확인: apiSuccess=${result.apiSuccess}, clients=${result.clients?.length || 0}개`);
+    
+    // ✅ Phase 1: Raw 스냅샷 저장 (원천 데이터 그대로 보관)
+    if (result.clients && result.clients.length > 0 && run && saveRawSnapshot) {
+      try {
+        saveRawSnapshot({
+          source: 'hometax',
+          type: 'clients',
+          rawPayload: result.clients,
+          runId: run.runId || 'unknown',
+          taxAccountantId,
+          certPath: certPath,
+          parseVersion: '1.0.0',
+        });
+        console.log(`[server.js] ✅ Raw 스냅샷 저장 완료 (홈택스 거래처 ${result.clients.length}건)`);
+      } catch (rawErr) {
+        console.error(`[server.js] ⚠️ Raw 스냅샷 저장 실패 (서비스에는 영향 없음):`, rawErr.message);
+      }
+    }
+    
     if (!result.apiSuccess || !result.clients || result.clients.length === 0) {
+      // Run 완료 (실패 또는 빈 결과)
+      if (run && completeRun) {
+        try {
+          completeRun(run.runId, { status: 'FAILED', totalTasks: 0, successTasks: 0, failedTasks: 0, errorSummary: result.apiError || '조회된 거래처 없음' });
+        } catch (runErr) {
+          console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+        }
+      }
       return res.json({
         success: true,
         data: [],
@@ -1069,6 +1124,21 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       }
     });
     
+    // ✅ Run 완료 처리
+    if (run && completeRun) {
+      try {
+        completeRun(run.runId, {
+          status: savedCompanies.length > 0 ? 'SUCCESS' : 'FAILED',
+          totalTasks: companies.length,
+          successTasks: savedCompanies.length,
+          failedTasks: companies.length - savedCompanies.length,
+          snapshotPath: `hometax/clients/`,
+        });
+      } catch (runErr) {
+        console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+      }
+    }
+    
     res.json({
       success: true,
       data: savedCompanies,
@@ -1077,6 +1147,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         taxAccountantId,
         taxAccountantName: taxAccountant.name,
         fetchedCount: savedCompanies.length,
+        runId: run?.runId,
         stats: {
           new: newCount,
           updated: updatedCount,
@@ -1086,10 +1157,556 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
     });
   } catch (error) {
     console.error('[ERROR] 거래처 조회 오류:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // Run 실패 처리
+    if (run && completeRun) {
+      try {
+        completeRun(run.runId, { status: 'FAILED', totalTasks: 0, successTasks: 0, failedTasks: 0, errorSummary: errorMessage });
+      } catch (runErr) {
+        console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+      }
+    }
     res.status(500).json({
       success: false,
       data: null,
-      message: '거래처 조회 중 오류가 발생했습니다.',
+      message: `거래처 조회 중 오류가 발생했습니다: ${errorMessage}`,
+      error: errorMessage,
+    });
+  }
+});
+
+// 위택스 거래처 조회 및 저장
+app.post('/api/companies/fetch-from-wetax', async (req, res) => {
+  let run = null;
+  try {
+    const { taxAccountantId } = req.body;
+    
+    if (!taxAccountantId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사 ID는 필수입니다.',
+      });
+    }
+    
+    // 세무사 정보 조회 (검증 먼저)
+    const taxAccountant = await getTaxAccountant(taxAccountantId);
+    if (!taxAccountant) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    // 인증서 정보 확인
+    if (!taxAccountant.certificateHash) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사에 연동된 인증서가 없습니다.',
+      });
+    }
+    
+    // ✅ 검증 완료 후 Run 시작
+    if (startRun) {
+      run = startRun({ source: 'wetax', type: 'clients', taxAccountantId });
+    } else {
+      console.warn('[server.js] startRun 함수를 찾을 수 없습니다. Raw 저장을 건너뜁니다.');
+    }
+    
+    // 인증서 경로 및 비밀번호 조회
+    const certPath = taxAccountant.certificatePath || await getCertPathByHash(taxAccountant.certificateHash);
+    if (!certPath) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '인증서 경로를 찾을 수 없습니다.',
+      });
+    }
+    
+    const password = await getCertificatePassword(certPath);
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '인증서 비밀번호를 찾을 수 없습니다.',
+      });
+    }
+    
+    // 인증서 파일 읽기
+    const certFileData = fs.readFileSync(certPath);
+    
+    // 위택스 위임자 조회
+    const fetcher = new WetaxClientFetcher();
+    const certificateData = {
+      certFilename: require('path').basename(certPath),
+      certFileData: certFileData,
+      certPassword: password
+    };
+    
+    console.log(`[server.js] 위택스 위임자 조회 시작: ${taxAccountant.name} (ID: ${taxAccountantId})`);
+    const wetaxClients = await fetcher.fetchClients(certificateData);
+    
+    // 위임자 그룹을 평탄화하여 Company 형식으로 변환
+    const allClients = [];
+    for (const groupId in wetaxClients) {
+      const groupClients = wetaxClients[groupId];
+      allClients.push(...groupClients);
+    }
+    
+    console.log(`[server.js] 조회된 위택스 위임자 수: ${allClients.length}개`);
+    
+    // ✅ Phase 1: Raw 스냅샷 저장 (원천 데이터 그대로 보관)
+    if (allClients.length > 0 && run && saveRawSnapshot) {
+      try {
+        saveRawSnapshot({
+          source: 'wetax',
+          type: 'clients',
+          rawPayload: wetaxClients, // 그룹화된 원본 그대로 저장
+          runId: run.runId || 'unknown',
+          taxAccountantId,
+          certPath: certPath,
+          parseVersion: '1.0.0',
+        });
+        console.log(`[server.js] ✅ Raw 스냅샷 저장 완료 (위택스 위임자 ${allClients.length}건)`);
+      } catch (rawErr) {
+        console.error(`[server.js] ⚠️ Raw 스냅샷 저장 실패 (서비스에는 영향 없음):`, rawErr.message);
+      }
+    }
+    
+    if (allClients.length === 0) {
+      if (run && completeRun) {
+        try {
+          completeRun(run.runId, { status: 'FAILED', totalTasks: 0, successTasks: 0, failedTasks: 0, errorSummary: '조회된 위택스 거래처 없음' });
+        } catch (runErr) {
+          console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+        }
+      }
+      return res.json({
+        success: true,
+        data: [],
+        message: '조회된 위택스 거래처가 없습니다.',
+        meta: {
+          taxAccountantId,
+          taxAccountantName: taxAccountant.name,
+          fetchedCount: 0,
+        }
+      });
+    }
+    
+    // 위택스 위임자 데이터를 Company 형식으로 변환
+    const companies = allClients.map((client) => {
+      const name = client.dlgpConmNm || client.dlgpNm || '거래처명 없음';
+      const businessNumber = (client.dlgpBrno || client.dlgpBzmnId || '').replace(/-/g, '');
+      const representative = client.dlgpNm || '';
+      const phone = client.dlgpMblTelno || '';
+      
+      return {
+        name,
+        businessNumber: businessNumber,
+        ceoName: representative,
+        address: '',
+        phone,
+        email: '',
+        industry: '',
+        employeeCount: 0,
+        taxAccountantId: taxAccountantId,
+        _source: 'wetax', // 위택스 출처 표시
+        _originalData: client,
+      };
+    });
+    
+    console.log(`[server.js] 변환된 거래처 수: ${companies.length}개`);
+    
+    // 위택스 거래처 저장 (별도 저장소 사용: data/wetax-companies/index.json)
+    let savedCompanies = [];
+    try {
+      savedCompanies = await saveWetaxCompanies(companies, {
+        updateExisting: true // 기존 거래처 업데이트
+      });
+      console.log(`[server.js] saveWetaxCompanies 반환: ${savedCompanies.length}개`);
+    } catch (error) {
+      console.error(`[server.js] saveWetaxCompanies 오류:`, error);
+    }
+    
+    // 통계 계산 (신규 vs 업데이트)
+    let newCount = 0;
+    let updatedCount = 0;
+    
+    savedCompanies.forEach(company => {
+      if (company.createdAt === company.updatedAt) {
+        newCount++;
+      } else {
+        updatedCount++;
+      }
+    });
+    
+    // ✅ Run 완료 처리
+    if (run && completeRun) {
+      try {
+        completeRun(run.runId, {
+          status: savedCompanies.length > 0 ? 'SUCCESS' : 'FAILED',
+          totalTasks: companies.length,
+          successTasks: savedCompanies.length,
+          failedTasks: companies.length - savedCompanies.length,
+          snapshotPath: `wetax/clients/`,
+        });
+      } catch (runErr) {
+        console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: savedCompanies,
+      message: `${savedCompanies.length}개 위택스 거래처가 조회되어 저장되었습니다. (신규: ${newCount}개, 업데이트: ${updatedCount}개)`,
+      meta: {
+        taxAccountantId,
+        taxAccountantName: taxAccountant.name,
+        fetchedCount: savedCompanies.length,
+        runId: run?.runId,
+        stats: {
+          new: newCount,
+          updated: updatedCount,
+          total: savedCompanies.length
+        }
+      }
+    });
+  } catch (error) {
+    console.error('[ERROR] 위택스 거래처 조회 오류:', error);
+    if (run && completeRun) {
+      try {
+        completeRun(run.runId, { status: 'FAILED', totalTasks: 0, successTasks: 0, failedTasks: 0, errorSummary: error.message });
+      } catch (runErr) {
+        console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+      }
+    }
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '위택스 거래처 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// ========== 위택스 거래처 관리 API ==========
+
+// 위택스 거래처 목록 조회
+app.get('/api/wetax-companies', async (req, res) => {
+  try {
+    const { taxAccountantId } = req.query;
+    const companies = await listWetaxCompanies(taxAccountantId || undefined);
+    res.json({
+      success: true,
+      data: companies,
+      message: '위택스 거래처 목록 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '위택스 거래처 목록 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// ========== 위택스 특별징수 신고서 관리 API ==========
+
+// 위택스 특별징수 신고서 수집 (최근 12개월)
+app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
+  let run = null;
+  try {
+    const { taxAccountantId } = req.body;
+    
+    if (!taxAccountantId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사 ID는 필수입니다.',
+      });
+    }
+    
+    // 세무사 정보 조회
+    const taxAccountant = await getTaxAccountant(taxAccountantId);
+    if (!taxAccountant) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '세무사를 찾을 수 없습니다.',
+      });
+    }
+    
+    // 인증서 정보 확인
+    if (!taxAccountant.certificateHash) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        message: '세무사에 연동된 인증서가 없습니다.',
+      });
+    }
+    
+    // ✅ 검증 완료 후 Run 시작
+    if (startRun) {
+      run = startRun({ source: 'wetax', type: 'reports', taxAccountantId });
+    } else {
+      console.warn('[server.js] startRun 함수를 찾을 수 없습니다. Raw 저장을 건너뜁니다.');
+    }
+    
+    // 인증서 경로 및 비밀번호 조회
+    const certPath = taxAccountant.certificatePath || await getCertPathByHash(taxAccountant.certificateHash);
+    if (!certPath) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '인증서 경로를 찾을 수 없습니다.',
+      });
+    }
+    
+    const password = await getCertificatePassword(certPath);
+    if (!password) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        message: '인증서 비밀번호를 찾을 수 없습니다.',
+      });
+    }
+    
+    // 인증서 파일 읽기
+    const fs = require('fs');
+    const certFileData = fs.readFileSync(certPath);
+    const certificateData = {
+      certFilename: require('path').basename(certPath),
+      certFileData: certFileData,
+      certPassword: password
+    };
+    
+    // 위임자 목록 조회
+    console.log(`[server.js] 위택스 위임자 목록 조회 시작: ${taxAccountant.name} (ID: ${taxAccountantId})`);
+    const fetcher = new WetaxClientFetcher();
+    const clients = await fetcher.fetchClients(certificateData);
+    
+    // 최근 12개월부터 현재일까지 (위택스는 최근 12개월까지만 검색 가능)
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setMonth(startDate.getMonth() - 12); // 최근 12개월
+    
+    console.log(`[server.js] 수집 기간: ${startDate.toISOString().split('T')[0]} ~ ${endDate.toISOString().split('T')[0]}`);
+    
+    // 특별징수 신고서 수집
+    const collector = new WetaxReportCollector();
+    const collectionResult = await collector.collectWithholdingTaxReports(
+      certificateData,
+      clients,
+      {
+        startDate,
+        endDate,
+        delayBetweenRequests: 0.1,
+        onProgress: (current, total) => {
+          if (current % 10 === 0 || current === total) {
+            console.log(`[server.js] 진행 상황: ${current}/${total} (${Math.round((current / total) * 100)}%)`);
+          }
+        }
+      }
+    );
+    
+    console.log(`[server.js] ✅ 수집 완료: ${collectionResult.totalReports}개 신고서, ${collectionResult.totalTaxpayers}명 납세의무자`);
+    
+    // ✅ Phase 1: Raw 스냅샷 저장
+    if (collectionResult.reports.length > 0 && run && saveRawSnapshot) {
+      try {
+        saveRawSnapshot({
+          source: 'wetax',
+          type: 'reports',
+          rawPayload: collectionResult.reports,
+          runId: run.runId || 'unknown',
+          taxAccountantId,
+          certPath: certPath,
+          parseVersion: '1.0.0',
+        });
+        console.log(`[server.js] ✅ Raw 스냅샷 저장 완료 (위택스 특별징수 신고서 ${collectionResult.reports.length}건)`);
+      } catch (rawErr) {
+        console.error(`[server.js] ⚠️ Raw 스냅샷 저장 실패 (서비스에는 영향 없음):`, rawErr.message);
+      }
+    }
+    
+    // ✅ Serving 레이어 저장
+    let savedReports = [];
+    if (collectionResult.reports.length > 0) {
+      try {
+        savedReports = await saveWithholdingReports(
+          collectionResult.reports,
+          taxAccountantId,
+          taxAccountant.name
+        );
+        console.log(`[server.js] ✅ Serving 레이어 저장 완료 (${savedReports.length}건)`);
+      } catch (saveErr) {
+        console.error(`[server.js] ⚠️ Serving 레이어 저장 실패:`, saveErr.message);
+      }
+    }
+    
+    // ✅ Run 완료 처리
+    if (run && completeRun) {
+      try {
+        completeRun(run.runId, {
+          status: collectionResult.successCount > 0 ? 'SUCCESS' : 'FAILED',
+          totalTasks: collectionResult.totalReports,
+          successTasks: collectionResult.successCount,
+          failedTasks: collectionResult.failCount,
+          snapshotPath: `wetax/reports/`,
+        });
+      } catch (runErr) {
+        console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: savedReports,
+      message: `${collectionResult.totalReports}개 신고서 수집 완료 (성공: ${collectionResult.successCount}, 실패: ${collectionResult.failCount}, 납세의무자: ${collectionResult.totalTaxpayers}명)`,
+      meta: {
+        taxAccountantId,
+        taxAccountantName: taxAccountant.name,
+        totalReports: collectionResult.totalReports,
+        totalTaxpayers: collectionResult.totalTaxpayers,
+        successCount: collectionResult.successCount,
+        failCount: collectionResult.failCount,
+        savedCount: savedReports.length,
+        runId: run?.runId,
+      }
+    });
+    
+  } catch (error) {
+    console.error('[ERROR] 위택스 특별징수 신고서 수집 오류:', error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Run 실패 처리
+    if (run && completeRun) {
+      try {
+        completeRun(run.runId, { status: 'FAILED', totalTasks: 0, successTasks: 0, failedTasks: 0, errorSummary: errorMessage });
+      } catch (runErr) {
+        console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
+      }
+    }
+    
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '위택스 특별징수 신고서 수집 중 오류가 발생했습니다.',
+      error: errorMessage,
+    });
+  }
+});
+
+// 위택스 특별징수 신고서 목록 조회
+app.get('/api/wetax/reports/withholding-tax', async (req, res) => {
+  try {
+    const { taxAccountantId } = req.query;
+    const reports = await listWithholdingReports(taxAccountantId || undefined);
+    res.json({
+      success: true,
+      data: reports,
+      message: '위택스 특별징수 신고서 목록 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '위택스 특별징수 신고서 목록 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 위택스 특별징수 신고서 KPI 통계 조회
+app.get('/api/wetax/reports/withholding-tax/kpi', async (req, res) => {
+  try {
+    const { taxAccountantId } = req.query;
+    const kpi = await getWithholdingTaxKPI(taxAccountantId || undefined);
+    res.json({
+      success: true,
+      data: kpi,
+      message: 'KPI 통계 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: 'KPI 통계 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 위택스 특별징수 신고서 거래처별 통계 조회
+app.get('/api/wetax/reports/withholding-tax/company-stats', async (req, res) => {
+  try {
+    const { taxAccountantId } = req.query;
+    const stats = await getCompanyWithholdingStats(taxAccountantId || undefined);
+    res.json({
+      success: true,
+      data: stats,
+      message: '거래처별 통계 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '거래처별 통계 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// 위택스 특별징수 신고서 납세의무자 목록 조회
+app.get('/api/wetax/reports/withholding-tax/taxpayers', async (req, res) => {
+  try {
+    const { businessNumber, month, incomeType, taxAccountantId } = req.query;
+    const taxpayers = await getTaxpayersByFilter({
+      businessNumber: businessNumber || undefined,
+      month: month || undefined,
+      incomeType: incomeType || undefined,
+      taxAccountantId: taxAccountantId || undefined,
+    });
+    res.json({
+      success: true,
+      data: taxpayers,
+      message: '납세의무자 목록 조회 성공',
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '납세의무자 목록 조회 중 오류가 발생했습니다.',
+      error: error.message,
+    });
+  }
+});
+
+// ========== 수집 실행 이력 API ==========
+
+// 수집 실행 이력 조회
+app.get('/api/scrape-runs', async (req, res) => {
+  try {
+    const { source, type, taxAccountantId, limit: limitStr } = req.query;
+    const runs = listRuns({
+      source: source || undefined,
+      type: type || undefined,
+      taxAccountantId: taxAccountantId || undefined,
+      limit: limitStr ? parseInt(limitStr) : 50,
+    });
+    res.json({
+      success: true,
+      data: runs,
+      message: `${runs.length}개 수집 실행 이력 조회`,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      data: null,
+      message: '수집 실행 이력 조회 중 오류가 발생했습니다.',
       error: error.message,
     });
   }
@@ -1153,11 +1770,15 @@ app.delete('/api/companies/:id', async (req, res) => {
 });
 
 // 서버 시작
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`서버가 포트 ${PORT}에서 실행 중입니다.`);
   console.log(`외부 API 서버: ${EXTERNAL_API_BASE_URL}`);
   console.log(`상태 확인: http://localhost:${PORT}/api/status`);
   console.log('----------------------------------------');
+  
+  // 서버 타임아웃 설정 (수집 작업이 오래 걸릴 수 있으므로 30분으로 설정)
+  server.timeout = 30 * 60 * 1000; // 30분
+  server.keepAliveTimeout = 30 * 60 * 1000; // 30분
   
   // 서버 시작 시 자동으로 health check 수행
   try {
@@ -1179,5 +1800,30 @@ app.listen(PORT, async () => {
   } catch (error) {
     console.error('[Health Check] 오류 발생:', error.message);
   }
+});
+
+// ✅ Graceful shutdown - nodemon 재시작 시 포트 해제 보장
+function gracefulShutdown(signal) {
+  console.log(`\n[서버] ${signal} 수신, 서버 종료 중...`);
+  server.close(() => {
+    console.log('[서버] HTTP 서버 종료 완료');
+    process.exit(0);
+  });
+  // 5초 후 강제 종료 (연결이 끊기지 않을 경우)
+  setTimeout(() => {
+    console.error('[서버] 강제 종료');
+    process.exit(1);
+  }, 5000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// nodemon 전용: SIGUSR2 수신 시 graceful shutdown 후 다시 SIGUSR2 전송
+process.once('SIGUSR2', () => {
+  console.log('[서버] nodemon 재시작 감지 (SIGUSR2)');
+  server.close(() => {
+    process.kill(process.pid, 'SIGUSR2');
+  });
 });
 

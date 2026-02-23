@@ -1,0 +1,22 @@
+{
+  "watch": ["server.js", "backend/"],
+  "ignore": [
+    "data/",
+    "R&D/",
+    "frontend/",
+    "logs/",
+    "temp/",
+    "node_modules/",
+    "backend/dist/",
+    "backend/node_modules/",
+    "*.log",
+    "*.json",
+    "!server.js",
+    "!package.json",
+    "!nodemon.json"
+  ],
+  "ext": "js,ts,py",
+  "delay": "1000"
+}
+
+

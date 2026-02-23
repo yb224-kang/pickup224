@@ -24,8 +24,8 @@ try:
     import sys
     sys.modules['infer_metadata_from_file'] = infer_module
     
-    # without-password.py 모듈 로드
-    without_password_path = modules_path / 'certificate' / 'parsing' / 'without-password.py'
+    # without_password.py 모듈 로드
+    without_password_path = modules_path / 'certificate' / 'parsing' / 'without_password.py'
     spec = importlib.util.spec_from_file_location(
         "without_password",
         without_password_path

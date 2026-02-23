@@ -18,7 +18,7 @@ infer_spec.loader.exec_module(infer_module)
 sys.modules['infer_metadata_from_file'] = infer_module
 
 # parse_certificate_without_password 모듈 로드
-spec = importlib.util.spec_from_file_location("parse_certificate_without_password", modules_path / 'parsing' / 'without-password.py')
+spec = importlib.util.spec_from_file_location("parse_certificate_without_password", modules_path / 'parsing' / 'without_password.py')
 parse_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parse_module)
 parse_certificate_without_password = parse_module.parse_certificate_without_password

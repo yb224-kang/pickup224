@@ -171,3 +171,4 @@ with open(result_file, 'w', encoding='utf-8') as f:
 print()
 print(f"결과가 {result_file}에 저장되었습니다.")
 
+

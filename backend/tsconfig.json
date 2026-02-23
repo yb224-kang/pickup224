@@ -5,7 +5,6 @@
     "lib": ["ES2020"],
     "types": ["node"],
     "outDir": "./dist",
-    "rootDir": "./",
     "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -20,6 +19,6 @@
     },
     "transpileOnly": true
   },
-  "include": ["**/*.ts"],
+  "include": ["**/*.ts", "../R&D/wetax-module/src/**/*.ts"],
   "exclude": ["node_modules", "dist", "**/tests/**", "**/*.test.ts", "**/*.spec.ts"]
 }
