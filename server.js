@@ -1,38 +1,11 @@
-// 하이브리드 방식: 개발 환경은 ts-node, 프로덕션은 컴파일된 파일 사용
-const isDevelopment = process.env.NODE_ENV !== 'production';
+// TypeScript 런타임 지원
+require('ts-node').register({
+  project: './backend/tsconfig.json',
+  transpileOnly: true,
+});
 
-// 개발 환경에서만 ts-node 사용
-if (isDevelopment) {
-  try {
-    require('ts-node').register({
-      project: './backend/tsconfig.json',
-      transpileOnly: true,
-    });
-    console.log('[Development] TypeScript 런타임 컴파일 활성화');
-  } catch (error) {
-    console.warn('[Warning] ts-node를 찾을 수 없습니다. 컴파일된 파일을 사용합니다.');
-  }
-}
-
-// Backend 모듈 로드 (환경에 따라 자동 선택)
-let backendModule;
-try {
-  // 프로덕션: 컴파일된 파일 우선 시도
-  backendModule = require('./backend/dist/index');
-  if (!isDevelopment) {
-    console.log('[Production] 컴파일된 JavaScript 파일 사용');
-  }
-} catch (error) {
-  // 개발: TypeScript 파일 직접 사용 (ts-node가 처리)
-  console.log('[DEBUG] dist/index 로드 실패, TypeScript 파일 시도:', error.message);
-  backendModule = require('./backend/index');
-  if (isDevelopment) {
-    console.log('[Development] TypeScript 파일 직접 사용');
-  }
-}
-
-// 디버깅: backendModule 내용 확인
-console.log('[DEBUG] backendModule keys:', Object.keys(backendModule || {}));
+// 백엔드 모듈 로드
+const backendModule = require('./backend/index');
 
 const {
   discoverCertificatesBasic,
@@ -69,26 +42,41 @@ const {
   saveRawSnapshot
 } = backendModule;
 
-// 디버깅: 세무사 모듈 로드 확인
-console.log('[DEBUG] 세무사 모듈 확인:', {
-  listTaxAccountants: typeof listTaxAccountants,
-  saveTaxAccountant: typeof saveTaxAccountant,
-  getTaxAccountant: typeof getTaxAccountant,
-  updateTaxAccountant: typeof updateTaxAccountant,
-  deleteTaxAccountant: typeof deleteTaxAccountant,
-  linkCertificate: typeof linkCertificate,
-});
-
-// 디버깅: backendModule에서 직접 확인
-if (backendModule) {
-  console.log('[DEBUG] backendModule.listTaxAccountants:', typeof backendModule.listTaxAccountants);
-  console.log('[DEBUG] backendModule에 있는 세무사 관련 함수:', 
-    Object.keys(backendModule).filter(key => key.includes('Tax') || key.includes('tax')));
-}
-
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const fs = require('fs');
+const net = require('net');
+
+// ✅ 개선된 에러 핸들러 - 포트 충돌 등을 구분하여 처리
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled Promise Rejection:', reason);
+  console.error('[FATAL] Promise:', promise);
+  if (reason instanceof Error) {
+    console.error('[FATAL] Stack:', reason.stack);
+  }
+  // 치명적인 경우만 종료
+  if (reason && reason.code !== 'EADDRINUSE') {
+    console.error('[FATAL] 서버를 종료합니다.');
+    process.exit(1);
+  }
+});
+
+// Uncaught Exception 핸들러 - 포트 충돌은 별도 처리
+process.on('uncaughtException', (error) => {
+  console.error('[ERROR] Uncaught Exception:', error.message);
+  
+  if (error.code === 'EADDRINUSE') {
+    console.error(`[ERROR] 포트 ${PORT || 3000}이 이미 사용 중입니다.`);
+    console.error('[INFO] 기존 프로세스를 확인하고 종료한 후 다시 시도하세요.');
+    console.error('[INFO] 명령어: lsof -ti:3000 | xargs kill -TERM');
+    process.exit(1);
+  } else {
+    console.error('[FATAL] Stack:', error.stack);
+    console.error('[FATAL] 치명적 오류로 서버를 종료합니다.');
+    process.exit(1);
+  }
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -96,11 +84,67 @@ const PORT = process.env.PORT || 3000;
 // 외부 API 서버 주소
 const EXTERNAL_API_BASE_URL = 'http://112.155.1.171:8080/api';
 
-// 미들웨어 설정
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000'],
+// ✅ 1단계: Graceful Shutdown 개선 - 진행 중 작업 추적 (서버 시작 전에 정의)
+const activeTasks = new Set();
+const collectionProgress = new Map(); // 수집 진행률 정보 저장
+const MAX_SHUTDOWN_WAIT = 2 * 60 * 1000; // 최대 2분 대기
+
+// 진행 중 작업 등록/해제 헬퍼 함수
+function registerActiveTask(taskId) {
+  activeTasks.add(taskId);
+  console.log(`[서버] 작업 등록: ${taskId} (진행 중: ${activeTasks.size}개)`);
+}
+
+function unregisterActiveTask(taskId) {
+  activeTasks.delete(taskId);
+  collectionProgress.delete(taskId); // 진행률 정보도 제거
+  console.log(`[서버] 작업 완료: ${taskId} (진행 중: ${activeTasks.size}개)`);
+}
+
+// 진행률 업데이트 헬퍼 함수
+function updateProgress(taskId, current, total, description) {
+  const progress = {
+    taskId,
+    description,
+    current,
+    total,
+    percentage: Math.round((current / total) * 100),
+    timestamp: new Date().toISOString()
+  };
+  collectionProgress.set(taskId, progress);
+}
+
+// 동적 CORS 설정 - 개발/프로덕션 환경별 처리
+const corsOptions = {
+  origin: function (origin, callback) {
+    const isDevelopment = process.env.NODE_ENV !== 'production';
+    
+    if (isDevelopment) {
+      // 개발 환경: localhost의 모든 포트 허용 + null origin (같은 origin 요청)
+      if (!origin || origin.match(/^http:\/\/localhost:\d+$/)) {
+        callback(null, true);
+      } else {
+        console.log(`[CORS] 차단된 origin: ${origin}`);
+        callback(new Error('개발 환경에서는 localhost만 허용됩니다.'));
+      }
+    } else {
+      // 프로덕션 환경: 허용된 도메인만
+      const allowedOrigins = [
+        process.env.FRONTEND_URL || 'https://yourdomain.com',
+        process.env.API_URL || 'https://api.yourdomain.com'
+      ];
+      
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS 정책에 의해 차단됨: ${origin}`));
+      }
+    }
+  },
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -116,7 +160,7 @@ async function checkExternalApiStatus() {
         return status >= 200 && status < 400;
       }
     });
-    
+
     return {
       status: 'connected',
       statusCode: response.status,
@@ -201,37 +245,61 @@ app.get('/api/status', async (req, res) => {
   }
 });
 
+// 수집 진행률 조회 API
+app.get('/api/collection-status', (req, res) => {
+  try {
+    const activeCollections = Array.from(collectionProgress.values());
+    
+    res.json({
+      success: true,
+      data: {
+        activeTasks: activeTasks.size,
+        collections: activeCollections,
+        hasActiveCollections: activeCollections.length > 0
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: '수집 상태 조회 중 오류가 발생했습니다.',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 // 인증서 목록 조회 (기본) - 유효기간 포함
 app.get('/api/certificates/basic', async (req, res) => {
   try {
     const certificates = await discoverCertificatesBasic();
-    
+
     // 각 인증서의 유효기간 파싱
     const certificatesWithValidity = await Promise.all(
       certificates.map(async (cert) => {
         let validFrom = null;
         let validTo = null;
         let isExpired = false;
-        
+
         try {
           // Python 스크립트를 사용하여 유효기간 조회
           const { spawn } = require('child_process');
           const path = require('path');
           const pythonScript = path.join(__dirname, 'backend', 'scripts', 'get-cert-validity.py');
-          
+
           const result = await new Promise((resolve) => {
             const python = spawn('python3', [pythonScript, cert.path]);
             let stdout = '';
             let stderr = '';
-            
+
             python.stdout.on('data', (data) => {
               stdout += data.toString();
             });
-            
+
             python.stderr.on('data', (data) => {
               stderr += data.toString();
             });
-            
+
             python.on('close', (code) => {
               if (code === 0 && stdout.trim()) {
                 try {
@@ -254,7 +322,7 @@ app.get('/api/certificates/basic', async (req, res) => {
               }
             });
           });
-          
+
           if (result) {
             validFrom = result.validFrom;
             validTo = result.validTo;
@@ -264,7 +332,7 @@ app.get('/api/certificates/basic', async (req, res) => {
           // 파싱 실패 시 무시하고 기본 정보만 반환
           console.warn(`[인증서 파싱] ${cert.path}: ${error.message}`);
         }
-        
+
         return {
           type: cert.type,
           path: cert.path,
@@ -278,7 +346,7 @@ app.get('/api/certificates/basic', async (req, res) => {
         };
       })
     );
-    
+
     res.json({
       success: true,
       data: certificatesWithValidity,
@@ -298,14 +366,14 @@ app.get('/api/certificates/basic', async (req, res) => {
 app.get('/api/certificates/detailed', async (req, res) => {
   try {
     const certificates = await discoverCertificatesDetailed();
-    
+
     // 각 인증서의 유효기간 파싱 (기본 조회와 동일한 로직)
     const certificatesWithValidity = await Promise.all(
       certificates.map(async (cert) => {
         let validFrom = null;
         let validTo = null;
         let isExpired = false;
-        
+
         try {
           const { spawn } = require('child_process');
           const pythonScript = `
@@ -323,15 +391,15 @@ try:
 except Exception as e:
     print(json.dumps({'error': str(e)}))
 `;
-          
+
           const result = await new Promise((resolve) => {
             const python = spawn('python3', ['-c', pythonScript]);
             let stdout = '';
-            
+
             python.stdout.on('data', (data) => {
               stdout += data.toString();
             });
-            
+
             python.on('close', (code) => {
               if (code === 0 && stdout.trim()) {
                 try {
@@ -349,7 +417,7 @@ except Exception as e:
               }
             });
           });
-          
+
           if (result) {
             validFrom = result.validFrom;
             validTo = result.validTo;
@@ -358,7 +426,7 @@ except Exception as e:
         } catch (error) {
           console.warn(`[인증서 파싱] ${cert.path}: ${error.message}`);
         }
-        
+
         return {
           type: cert.type,
           path: cert.path,
@@ -372,7 +440,7 @@ except Exception as e:
         };
       })
     );
-    
+
     res.json({
       success: true,
       data: certificatesWithValidity,
@@ -392,25 +460,25 @@ except Exception as e:
 app.post('/api/certificates/password', async (req, res) => {
   try {
     const { certPath, password } = req.body;
-    
+
     if (!certPath || !password) {
       return res.status(400).json({
         success: false,
         message: '인증서 경로와 비밀번호가 필요합니다.',
       });
     }
-    
+
     // 로깅: 저장 요청 정보
     const crypto = require('crypto');
     const hash = crypto.createHash('sha256').update(certPath).digest('hex');
     console.log('[비밀번호 저장] 인증서 경로:', certPath);
     console.log('[비밀번호 저장] 해시:', hash);
     console.log('[비밀번호 저장] 비밀번호 길이:', password.length);
-    
+
     await saveCertificatePassword(certPath, password);
-    
+
     console.log('[비밀번호 저장] 저장 완료');
-    
+
     res.json({
       success: true,
       message: '인증서 비밀번호가 저장되었습니다.',
@@ -429,16 +497,16 @@ app.post('/api/certificates/password', async (req, res) => {
 app.get('/api/certificates/password', async (req, res) => {
   try {
     const { certPath } = req.query;
-    
+
     if (!certPath) {
       return res.status(400).json({
         success: false,
         message: '인증서 경로가 필요합니다.',
       });
     }
-    
+
     const password = await getCertificatePassword(certPath);
-    
+
     if (!password) {
       return res.json({
         success: true,
@@ -446,7 +514,7 @@ app.get('/api/certificates/password', async (req, res) => {
         message: '저장된 비밀번호가 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       data: { password },
@@ -465,16 +533,16 @@ app.get('/api/certificates/password', async (req, res) => {
 app.delete('/api/certificates/password', async (req, res) => {
   try {
     const { certPath } = req.query;
-    
+
     if (!certPath) {
       return res.status(400).json({
         success: false,
         message: '인증서 경로가 필요합니다.',
       });
     }
-    
+
     await deleteCertificatePassword(certPath);
-    
+
     res.json({
       success: true,
       message: '인증서 비밀번호가 삭제되었습니다.',
@@ -494,10 +562,10 @@ app.post('/api/hometax/clients/fetch-all', async (req, res) => {
     const { spawn } = require('child_process');
     const path = require('path');
     const pythonScriptPath = path.join(__dirname, 'backend', 'integration', 'scripts', 'fetch-all-clients.py');
-    
+
     // 저장된 인증서 목록 조회
     const savedCerts = await listSavedCertificates();
-    
+
     if (!savedCerts || savedCerts.length === 0) {
       return res.json({
         success: false,
@@ -505,7 +573,7 @@ app.post('/api/hometax/clients/fetch-all', async (req, res) => {
         message: '저장된 인증서가 없습니다.',
       });
     }
-    
+
     // 각 인증서의 비밀번호 조회
     const certsWithPassword = await Promise.all(
       savedCerts.map(async (cert) => {
@@ -517,10 +585,10 @@ app.post('/api/hometax/clients/fetch-all', async (req, res) => {
         };
       })
     );
-    
+
     // 비밀번호가 있는 인증서만 필터링
     const validCerts = certsWithPassword.filter(cert => cert.password);
-    
+
     if (validCerts.length === 0) {
       return res.json({
         success: false,
@@ -528,7 +596,7 @@ app.post('/api/hometax/clients/fetch-all', async (req, res) => {
         message: '비밀번호가 저장된 인증서가 없습니다.',
       });
     }
-    
+
     // Python 스크립트 실행 (저장된 인증서 정보와 비밀번호 전달)
     const result = await new Promise((resolve, reject) => {
       const python = spawn('python3', [
@@ -540,20 +608,20 @@ app.post('/api/hometax/clients/fetch-all', async (req, res) => {
           AXCEL_ENCRYPTION_KEY: process.env.AXCEL_ENCRYPTION_KEY || '',
         }
       });
-      
+
       let stdout = '';
       let stderr = '';
-      
+
       python.stdout.on('data', (data) => {
         stdout += data.toString();
       });
-      
+
       python.stderr.on('data', (data) => {
         stderr += data.toString();
         // Python의 디버그 메시지는 stderr로 출력되므로 로깅
         console.log(`[Python] ${data.toString().trim()}`);
       });
-      
+
       python.on('close', (code) => {
         if (code === 0 && stdout.trim()) {
           try {
@@ -567,7 +635,7 @@ app.post('/api/hometax/clients/fetch-all', async (req, res) => {
         }
       });
     });
-    
+
     res.json({
       success: true,
       data: result.clients || [],
@@ -624,11 +692,11 @@ app.get('/api/tax-accountants', async (req, res) => {
         error: `listTaxAccountants type: ${typeof listTaxAccountants}`,
       });
     }
-    
+
     console.log('[DEBUG] listTaxAccountants 호출 시작');
     const taxAccountants = await listTaxAccountants();
     console.log('[DEBUG] listTaxAccountants 결과:', taxAccountants?.length || 0, '개');
-    
+
     res.json({
       success: true,
       data: taxAccountants,
@@ -652,7 +720,7 @@ app.get('/api/tax-accountants/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const taxAccountant = await getTaxAccountant(id);
-    
+
     if (!taxAccountant) {
       return res.status(404).json({
         success: false,
@@ -660,7 +728,7 @@ app.get('/api/tax-accountants/:id', async (req, res) => {
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       data: taxAccountant,
@@ -680,7 +748,7 @@ app.get('/api/tax-accountants/:id', async (req, res) => {
 app.post('/api/tax-accountants', async (req, res) => {
   try {
     const { name, representative, certificateHash, certificatePath, status, autoSync, metadata } = req.body;
-    
+
     if (!name) {
       return res.status(400).json({
         success: false,
@@ -688,7 +756,7 @@ app.post('/api/tax-accountants', async (req, res) => {
         message: '세무사명은 필수입니다.',
       });
     }
-    
+
     const taxAccountant = await saveTaxAccountant({
       name,
       representative,
@@ -699,7 +767,7 @@ app.post('/api/tax-accountants', async (req, res) => {
       autoSync: autoSync !== undefined ? autoSync : false,
       metadata,
     });
-    
+
     res.json({
       success: true,
       data: taxAccountant,
@@ -720,7 +788,7 @@ app.put('/api/tax-accountants/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, representative, certificateHash, certificatePath, status, autoSync, metadata } = req.body;
-    
+
     const updated = await updateTaxAccountant(id, {
       name,
       representative,
@@ -730,7 +798,7 @@ app.put('/api/tax-accountants/:id', async (req, res) => {
       autoSync,
       metadata,
     });
-    
+
     if (!updated) {
       return res.status(404).json({
         success: false,
@@ -738,7 +806,7 @@ app.put('/api/tax-accountants/:id', async (req, res) => {
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       data: updated,
@@ -759,14 +827,14 @@ app.delete('/api/tax-accountants/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await deleteTaxAccountant(id);
-    
+
     if (!deleted) {
       return res.status(404).json({
         success: false,
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       message: '세무사가 삭제되었습니다.',
@@ -785,7 +853,7 @@ app.post('/api/tax-accountants/:id/link-certificate', async (req, res) => {
   try {
     const { id } = req.params;
     const { certificateHash, certificatePath } = req.body;
-    
+
     if (!certificateHash) {
       return res.status(400).json({
         success: false,
@@ -793,16 +861,16 @@ app.post('/api/tax-accountants/:id/link-certificate', async (req, res) => {
         message: '인증서 해시는 필수입니다.',
       });
     }
-    
+
     // 인증서 경로 조회 (certificateHash로)
     let finalCertPath = certificatePath;
     if (!finalCertPath) {
       const { getCertPathByHash } = require('./backend/modules/certificate/password/storage');
       finalCertPath = await getCertPathByHash(certificateHash) || undefined;
     }
-    
+
     const updated = await linkCertificate(id, certificateHash, finalCertPath);
-    
+
     if (!updated) {
       return res.status(404).json({
         success: false,
@@ -810,7 +878,7 @@ app.post('/api/tax-accountants/:id/link-certificate', async (req, res) => {
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       data: updated,
@@ -853,7 +921,7 @@ app.get('/api/companies/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const company = await getCompany(id);
-    
+
     if (!company) {
       return res.status(404).json({
         success: false,
@@ -861,7 +929,7 @@ app.get('/api/companies/:id', async (req, res) => {
         message: '거래처를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       data: company,
@@ -880,10 +948,12 @@ app.get('/api/companies/:id', async (req, res) => {
 // 선택된 세무사의 홈택스 거래처 조회 및 저장
 app.post('/api/companies/fetch-from-hometax', async (req, res) => {
   let run = null;
+  const taskId = `hometax-fetch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  registerActiveTask(taskId);
   console.log(`[server.js] ✅ 거래처 조회 요청 수신: taxAccountantId=${req.body?.taxAccountantId}`);
   try {
     const { taxAccountantId } = req.body;
-    
+
     if (!taxAccountantId) {
       return res.status(400).json({
         success: false,
@@ -891,7 +961,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         message: '세무사 ID는 필수입니다.',
       });
     }
-    
+
     // 세무사 정보 조회 (검증 먼저)
     const taxAccountant = await getTaxAccountant(taxAccountantId);
     if (!taxAccountant) {
@@ -901,7 +971,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     // 인증서 정보 확인
     if (!taxAccountant.certificateHash) {
       return res.status(400).json({
@@ -910,14 +980,14 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         message: '세무사에 연동된 인증서가 없습니다.',
       });
     }
-    
+
     // ✅ 검증 완료 후 Run 시작
     if (startRun) {
       run = startRun({ source: 'hometax', type: 'clients', taxAccountantId });
     } else {
       console.warn('[server.js] startRun 함수를 찾을 수 없습니다. Raw 저장을 건너뜁니다.');
     }
-    
+
     // 인증서 경로 및 비밀번호 조회
     const certPath = taxAccountant.certificatePath || await getCertPathByHash(taxAccountant.certificateHash);
     if (!certPath) {
@@ -927,7 +997,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         message: '인증서 경로를 찾을 수 없습니다.',
       });
     }
-    
+
     const password = await getCertificatePassword(certPath);
     if (!password) {
       return res.status(400).json({
@@ -936,15 +1006,15 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         message: '인증서 비밀번호를 찾을 수 없습니다.',
       });
     }
-    
+
     // Python 스크립트 실행 (get-session-with-permission.py)
     const { spawn } = require('child_process');
     const path = require('path');
     const pythonScriptPath = path.join(__dirname, 'backend', 'integration', 'scripts', 'get-session-with-permission.py');
-    
+
     console.log(`[server.js] 🔄 Python 스크립트 실행 시작: ${pythonScriptPath}`);
     console.log(`[server.js] 인증서 경로: ${certPath}`);
-    
+
     const result = await new Promise((resolve, reject) => {
       const python = spawn('python3', [
         pythonScriptPath,
@@ -956,27 +1026,50 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
           AXCEL_ENCRYPTION_KEY: process.env.AXCEL_ENCRYPTION_KEY || '',
         }
       });
-      
+
       let stdout = '';
       let stderr = '';
-      
+
+      // ✅ 1단계: Python 프로세스 정리 로직 개선
       // 타임아웃 설정 (5분)
+      let timeoutCleared = false;
       const timeout = setTimeout(() => {
-        python.kill('SIGTERM');
+        if (!python.killed) {
+          console.warn('[server.js] Python 프로세스 타임아웃, SIGTERM 전송');
+          python.kill('SIGTERM');
+          // 3초 후 강제 종료 (SIGKILL)
+          setTimeout(() => {
+            if (!python.killed) {
+              console.warn('[server.js] Python 프로세스 강제 종료 (SIGKILL)');
+              python.kill('SIGKILL');
+            }
+          }, 3000);
+        }
+        timeoutCleared = true;
         reject(new Error('Python 스크립트 실행 시간 초과 (5분)'));
       }, 5 * 60 * 1000);
-      
+
       python.stdout.on('data', (data) => {
         stdout += data.toString();
       });
-      
+
       python.stderr.on('data', (data) => {
         stderr += data.toString();
         console.log(`[Python] ${data.toString().trim()}`);
       });
-      
+
       python.on('close', (code) => {
-        clearTimeout(timeout);
+        if (!timeoutCleared) {
+          clearTimeout(timeout);
+        }
+        // 프로세스가 정상 종료되지 않았고 아직 살아있다면 정리
+        if (code !== 0 && !python.killed) {
+          try {
+            python.kill('SIGKILL');
+          } catch (e) {
+            // 이미 종료된 경우 무시
+          }
+        }
         if (code === 0 && stdout.trim()) {
           try {
             // JSON 부분만 추출
@@ -996,18 +1089,28 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
           reject(new Error(`Python 스크립트 실패 (코드: ${code})\n${stderr || '알 수 없는 오류'}`));
         }
       });
-      
+
       python.on('error', (error) => {
-        clearTimeout(timeout);
+        if (!timeoutCleared) {
+          clearTimeout(timeout);
+        }
+        // 에러 발생 시 프로세스 정리 시도
+        if (!python.killed) {
+          try {
+            python.kill('SIGKILL');
+          } catch (e) {
+            // 무시
+          }
+        }
         console.error(`[server.js] ❌ Python 프로세스 오류:`, error);
         reject(new Error(`Python 스크립트 실행 실패: ${error.message}`));
       });
     });
-    
+
     console.log(`[server.js] ✅ Python 스크립트 실행 완료`);
     // 거래처 데이터 확인
     console.log(`[server.js] API 응답 확인: apiSuccess=${result.apiSuccess}, clients=${result.clients?.length || 0}개`);
-    
+
     // ✅ Phase 1: Raw 스냅샷 저장 (원천 데이터 그대로 보관)
     if (result.clients && result.clients.length > 0 && run && saveRawSnapshot) {
       try {
@@ -1025,7 +1128,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         console.error(`[server.js] ⚠️ Raw 스냅샷 저장 실패 (서비스에는 영향 없음):`, rawErr.message);
       }
     }
-    
+
     if (!result.apiSuccess || !result.clients || result.clients.length === 0) {
       // Run 완료 (실패 또는 빈 결과)
       if (run && completeRun) {
@@ -1046,7 +1149,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         }
       });
     }
-    
+
     // 홈택스 거래처 데이터를 Company 형식으로 변환
     console.log(`[server.js] 조회된 거래처 수: ${result.clients?.length || 0}개`);
     const companies = result.clients.map((client) => {
@@ -1055,7 +1158,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       const representative = client.txprNm || client.대표자명 || '';
       const address = client.주소 || client.address || '';
       const phone = client.전화번호 || client.phone || '';
-      
+
       return {
         name,
         businessNumber: businessNumber.replace(/-/g, ''),
@@ -1070,10 +1173,10 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         _originalData: client,
       };
     });
-    
+
     console.log(`[server.js] 변환된 거래처 수: ${companies.length}개`);
     console.log(`[server.js] saveCompanies 호출 전`);
-    
+
     // 거래처 저장 (재조회 시 업데이트 옵션 활성화)
     let savedCompanies = [];
     try {
@@ -1081,20 +1184,20 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         updateExisting: true // 기존 거래처 업데이트
       });
       console.log(`[server.js] saveCompanies 반환: ${savedCompanies.length}개`);
-      
+
       // 저장된 개수와 조회된 개수 비교
       if (savedCompanies.length !== companies.length) {
         const missing = companies.length - savedCompanies.length;
         console.warn(`[server.js] ⚠️ 경고: 조회된 거래처 ${companies.length}개 중 ${savedCompanies.length}개만 저장되었습니다. (누락: ${missing}개)`);
         console.warn(`[server.js] 세무사: ${taxAccountant.name} (ID: ${taxAccountantId})`);
-        
+
         // 누락된 거래처 정보 출력 (처음 5개만)
         const savedBizNos = new Set(savedCompanies.map(c => c.businessNumber || c._originalData?.bsno || '').filter(Boolean));
         const missingCompanies = companies.filter(c => {
           const bizNo = c.businessNumber || c._originalData?.bsno || '';
           return bizNo && !savedBizNos.has(bizNo);
         }).slice(0, 5);
-        
+
         if (missingCompanies.length > 0) {
           console.warn(`[server.js] 누락된 거래처 예시 (최대 5개):`);
           missingCompanies.forEach(c => {
@@ -1110,11 +1213,11 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       // 일부는 저장되었을 수 있으므로 에러를 전파하지 않고 경고만 출력
       // 하지만 클라이언트에는 저장된 개수만 반환
     }
-    
+
     // 통계 계산 (신규 vs 업데이트)
     let newCount = 0;
     let updatedCount = 0;
-    
+
     savedCompanies.forEach(company => {
       // createdAt과 updatedAt이 같으면 신규, 다르면 업데이트
       if (company.createdAt === company.updatedAt) {
@@ -1123,7 +1226,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         updatedCount++;
       }
     });
-    
+
     // ✅ Run 완료 처리
     if (run && completeRun) {
       try {
@@ -1138,7 +1241,7 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
         console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
       }
     }
-    
+
     res.json({
       success: true,
       data: savedCompanies,
@@ -1172,15 +1275,20 @@ app.post('/api/companies/fetch-from-hometax', async (req, res) => {
       message: `거래처 조회 중 오류가 발생했습니다: ${errorMessage}`,
       error: errorMessage,
     });
+  } finally {
+    // ✅ 1단계: 작업 완료 등록 해제
+    unregisterActiveTask(taskId);
   }
 });
 
 // 위택스 거래처 조회 및 저장
 app.post('/api/companies/fetch-from-wetax', async (req, res) => {
   let run = null;
+  const taskId = `wetax-fetch-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  registerActiveTask(taskId);
   try {
     const { taxAccountantId } = req.body;
-    
+
     if (!taxAccountantId) {
       return res.status(400).json({
         success: false,
@@ -1188,7 +1296,7 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         message: '세무사 ID는 필수입니다.',
       });
     }
-    
+
     // 세무사 정보 조회 (검증 먼저)
     const taxAccountant = await getTaxAccountant(taxAccountantId);
     if (!taxAccountant) {
@@ -1198,7 +1306,7 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     // 인증서 정보 확인
     if (!taxAccountant.certificateHash) {
       return res.status(400).json({
@@ -1207,14 +1315,14 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         message: '세무사에 연동된 인증서가 없습니다.',
       });
     }
-    
+
     // ✅ 검증 완료 후 Run 시작
     if (startRun) {
       run = startRun({ source: 'wetax', type: 'clients', taxAccountantId });
     } else {
       console.warn('[server.js] startRun 함수를 찾을 수 없습니다. Raw 저장을 건너뜁니다.');
     }
-    
+
     // 인증서 경로 및 비밀번호 조회
     const certPath = taxAccountant.certificatePath || await getCertPathByHash(taxAccountant.certificateHash);
     if (!certPath) {
@@ -1224,7 +1332,7 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         message: '인증서 경로를 찾을 수 없습니다.',
       });
     }
-    
+
     const password = await getCertificatePassword(certPath);
     if (!password) {
       return res.status(400).json({
@@ -1233,10 +1341,10 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         message: '인증서 비밀번호를 찾을 수 없습니다.',
       });
     }
-    
+
     // 인증서 파일 읽기
     const certFileData = fs.readFileSync(certPath);
-    
+
     // 위택스 위임자 조회
     const fetcher = new WetaxClientFetcher();
     const certificateData = {
@@ -1244,19 +1352,19 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
       certFileData: certFileData,
       certPassword: password
     };
-    
+
     console.log(`[server.js] 위택스 위임자 조회 시작: ${taxAccountant.name} (ID: ${taxAccountantId})`);
     const wetaxClients = await fetcher.fetchClients(certificateData);
-    
+
     // 위임자 그룹을 평탄화하여 Company 형식으로 변환
     const allClients = [];
     for (const groupId in wetaxClients) {
       const groupClients = wetaxClients[groupId];
       allClients.push(...groupClients);
     }
-    
+
     console.log(`[server.js] 조회된 위택스 위임자 수: ${allClients.length}개`);
-    
+
     // ✅ Phase 1: Raw 스냅샷 저장 (원천 데이터 그대로 보관)
     if (allClients.length > 0 && run && saveRawSnapshot) {
       try {
@@ -1274,7 +1382,7 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         console.error(`[server.js] ⚠️ Raw 스냅샷 저장 실패 (서비스에는 영향 없음):`, rawErr.message);
       }
     }
-    
+
     if (allClients.length === 0) {
       if (run && completeRun) {
         try {
@@ -1294,14 +1402,14 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         }
       });
     }
-    
+
     // 위택스 위임자 데이터를 Company 형식으로 변환
     const companies = allClients.map((client) => {
       const name = client.dlgpConmNm || client.dlgpNm || '거래처명 없음';
       const businessNumber = (client.dlgpBrno || client.dlgpBzmnId || '').replace(/-/g, '');
       const representative = client.dlgpNm || '';
       const phone = client.dlgpMblTelno || '';
-      
+
       return {
         name,
         businessNumber: businessNumber,
@@ -1316,9 +1424,9 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         _originalData: client,
       };
     });
-    
+
     console.log(`[server.js] 변환된 거래처 수: ${companies.length}개`);
-    
+
     // 위택스 거래처 저장 (별도 저장소 사용: data/wetax-companies/index.json)
     let savedCompanies = [];
     try {
@@ -1329,11 +1437,11 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
     } catch (error) {
       console.error(`[server.js] saveWetaxCompanies 오류:`, error);
     }
-    
+
     // 통계 계산 (신규 vs 업데이트)
     let newCount = 0;
     let updatedCount = 0;
-    
+
     savedCompanies.forEach(company => {
       if (company.createdAt === company.updatedAt) {
         newCount++;
@@ -1341,7 +1449,7 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         updatedCount++;
       }
     });
-    
+
     // ✅ Run 완료 처리
     if (run && completeRun) {
       try {
@@ -1356,7 +1464,7 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
         console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
       }
     }
-    
+
     res.json({
       success: true,
       data: savedCompanies,
@@ -1388,6 +1496,9 @@ app.post('/api/companies/fetch-from-wetax', async (req, res) => {
       message: '위택스 거래처 조회 중 오류가 발생했습니다.',
       error: error.message,
     });
+  } finally {
+    // ✅ 1단계: 작업 완료 등록 해제
+    unregisterActiveTask(taskId);
   }
 });
 
@@ -1418,9 +1529,12 @@ app.get('/api/wetax-companies', async (req, res) => {
 // 위택스 특별징수 신고서 수집 (최근 12개월)
 app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
   let run = null;
+  const taskId = `wetax-collect-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  registerActiveTask(taskId);
+
   try {
     const { taxAccountantId } = req.body;
-    
+
     if (!taxAccountantId) {
       return res.status(400).json({
         success: false,
@@ -1428,7 +1542,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         message: '세무사 ID는 필수입니다.',
       });
     }
-    
+
     // 세무사 정보 조회
     const taxAccountant = await getTaxAccountant(taxAccountantId);
     if (!taxAccountant) {
@@ -1438,7 +1552,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         message: '세무사를 찾을 수 없습니다.',
       });
     }
-    
+
     // 인증서 정보 확인
     if (!taxAccountant.certificateHash) {
       return res.status(400).json({
@@ -1447,14 +1561,14 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         message: '세무사에 연동된 인증서가 없습니다.',
       });
     }
-    
+
     // ✅ 검증 완료 후 Run 시작
     if (startRun) {
       run = startRun({ source: 'wetax', type: 'reports', taxAccountantId });
     } else {
       console.warn('[server.js] startRun 함수를 찾을 수 없습니다. Raw 저장을 건너뜁니다.');
     }
-    
+
     // 인증서 경로 및 비밀번호 조회
     const certPath = taxAccountant.certificatePath || await getCertPathByHash(taxAccountant.certificateHash);
     if (!certPath) {
@@ -1464,7 +1578,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         message: '인증서 경로를 찾을 수 없습니다.',
       });
     }
-    
+
     const password = await getCertificatePassword(certPath);
     if (!password) {
       return res.status(404).json({
@@ -1473,7 +1587,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         message: '인증서 비밀번호를 찾을 수 없습니다.',
       });
     }
-    
+
     // 인증서 파일 읽기
     const fs = require('fs');
     const certFileData = fs.readFileSync(certPath);
@@ -1482,19 +1596,19 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
       certFileData: certFileData,
       certPassword: password
     };
-    
+
     // 위임자 목록 조회
     console.log(`[server.js] 위택스 위임자 목록 조회 시작: ${taxAccountant.name} (ID: ${taxAccountantId})`);
     const fetcher = new WetaxClientFetcher();
     const clients = await fetcher.fetchClients(certificateData);
-    
+
     // 최근 12개월부터 현재일까지 (위택스는 최근 12개월까지만 검색 가능)
     const endDate = new Date();
     const startDate = new Date();
     startDate.setMonth(startDate.getMonth() - 12); // 최근 12개월
-    
+
     console.log(`[server.js] 수집 기간: ${startDate.toISOString().split('T')[0]} ~ ${endDate.toISOString().split('T')[0]}`);
-    
+
     // 특별징수 신고서 수집
     const collector = new WetaxReportCollector();
     const collectionResult = await collector.collectWithholdingTaxReports(
@@ -1507,13 +1621,15 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         onProgress: (current, total) => {
           if (current % 10 === 0 || current === total) {
             console.log(`[server.js] 진행 상황: ${current}/${total} (${Math.round((current / total) * 100)}%)`);
+            // 진행률 업데이트
+            updateProgress(taskId, current, total, '위택스 특별징수 신고서 수집');
           }
         }
       }
     );
-    
+
     console.log(`[server.js] ✅ 수집 완료: ${collectionResult.totalReports}개 신고서, ${collectionResult.totalTaxpayers}명 납세의무자`);
-    
+
     // ✅ Phase 1: Raw 스냅샷 저장
     if (collectionResult.reports.length > 0 && run && saveRawSnapshot) {
       try {
@@ -1531,7 +1647,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         console.error(`[server.js] ⚠️ Raw 스냅샷 저장 실패 (서비스에는 영향 없음):`, rawErr.message);
       }
     }
-    
+
     // ✅ Serving 레이어 저장
     let savedReports = [];
     if (collectionResult.reports.length > 0) {
@@ -1546,7 +1662,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         console.error(`[server.js] ⚠️ Serving 레이어 저장 실패:`, saveErr.message);
       }
     }
-    
+
     // ✅ Run 완료 처리
     if (run && completeRun) {
       try {
@@ -1561,7 +1677,7 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
       }
     }
-    
+
     res.json({
       success: true,
       data: savedReports,
@@ -1577,11 +1693,11 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         runId: run?.runId,
       }
     });
-    
+
   } catch (error) {
     console.error('[ERROR] 위택스 특별징수 신고서 수집 오류:', error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    
+
     // Run 실패 처리
     if (run && completeRun) {
       try {
@@ -1590,13 +1706,16 @@ app.post('/api/wetax/reports/collect-withholding-tax', async (req, res) => {
         console.error(`[server.js] ⚠️ Run 완료 처리 실패 (서비스에는 영향 없음):`, runErr.message);
       }
     }
-    
+
     res.status(500).json({
       success: false,
       data: null,
       message: '위택스 특별징수 신고서 수집 중 오류가 발생했습니다.',
       error: errorMessage,
     });
+  } finally {
+    // ✅ 1단계: 작업 완료 등록 해제
+    unregisterActiveTask(taskId);
   }
 });
 
@@ -1717,9 +1836,9 @@ app.put('/api/companies/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = req.body;
-    
+
     const updated = await updateCompany(id, updateData);
-    
+
     if (!updated) {
       return res.status(404).json({
         success: false,
@@ -1727,7 +1846,7 @@ app.put('/api/companies/:id', async (req, res) => {
         message: '거래처를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       data: updated,
@@ -1748,14 +1867,14 @@ app.delete('/api/companies/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const deleted = await deleteCompany(id);
-    
+
     if (!deleted) {
       return res.status(404).json({
         success: false,
         message: '거래처를 찾을 수 없습니다.',
       });
     }
-    
+
     res.json({
       success: true,
       message: '거래처가 삭제되었습니다.',
@@ -1769,17 +1888,49 @@ app.delete('/api/companies/:id', async (req, res) => {
   }
 });
 
-// 서버 시작
-const server = app.listen(PORT, async () => {
+// ✅ 포트 사용 여부 확인 함수
+function checkPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    
+    server.listen(port, () => {
+      server.close(() => {
+        resolve(true); // 포트 사용 가능
+      });
+    });
+    
+    server.on('error', (err) => {
+      resolve(false); // 포트 이미 사용 중
+    });
+  });
+}
+
+// ✅ 안전한 서버 시작
+async function startServer() {
+  console.log(`[서버] 포트 ${PORT} 사용 가능 여부 확인 중...`);
+  
+  const isPortAvailable = await checkPortAvailable(PORT);
+  
+  if (!isPortAvailable) {
+    console.error(`[오류] 포트 ${PORT}이 이미 사용 중입니다.`);
+    console.error('[해결책] 기존 프로세스를 종료한 후 다시 시도하세요:');
+    console.error(`         lsof -ti:${PORT} | xargs kill -TERM`);
+    process.exit(1);
+    return;
+  }
+  
+  console.log(`[서버] 포트 ${PORT} 사용 가능 확인됨. 서버 시작 중...`);
+  
+  const server = app.listen(PORT, async () => {
   console.log(`서버가 포트 ${PORT}에서 실행 중입니다.`);
   console.log(`외부 API 서버: ${EXTERNAL_API_BASE_URL}`);
   console.log(`상태 확인: http://localhost:${PORT}/api/status`);
   console.log('----------------------------------------');
-  
+
   // 서버 타임아웃 설정 (수집 작업이 오래 걸릴 수 있으므로 30분으로 설정)
   server.timeout = 30 * 60 * 1000; // 30분
   server.keepAliveTimeout = 30 * 60 * 1000; // 30분
-  
+
   // 서버 시작 시 자동으로 health check 수행
   try {
     // 내부 서버 health check
@@ -1791,7 +1942,7 @@ const server = app.listen(PORT, async () => {
     console.log('[Health Check] 내부 서버 상태:');
     console.log(JSON.stringify(healthCheck, null, 2));
     console.log('----------------------------------------');
-    
+
     // 외부 API 서버 상태 확인
     console.log('[Health Check] 외부 API 서버 상태 확인 중...');
     const externalStatus = await checkExternalApiStatus();
@@ -1802,16 +1953,66 @@ const server = app.listen(PORT, async () => {
   }
 });
 
-// ✅ Graceful shutdown - nodemon 재시작 시 포트 해제 보장
-function gracefulShutdown(signal) {
-  console.log(`\n[서버] ${signal} 수신, 서버 종료 중...`);
-  server.close(() => {
-    console.log('[서버] HTTP 서버 종료 완료');
-    process.exit(0);
+  // ✅ 서버 시작 오류 처리
+  server.on('error', (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`[오류] 포트 ${PORT}가 이미 사용 중입니다.`);
+      console.error('[해결책] 다음 명령어로 기존 프로세스를 종료한 후 다시 시도하세요:');
+      console.error(`         lsof -ti:${PORT} | xargs kill -TERM`);
+      process.exit(1);
+    } else {
+      console.error('[오류] 서버 시작 중 오류 발생:', error);
+      throw error; // 다른 오류는 uncaughtException 핸들러로 전달
+    }
   });
-  // 5초 후 강제 종료 (연결이 끊기지 않을 경우)
+
+  // 전역 변수에 서버 저장 (graceful shutdown용)
+  globalServer = server;
+  return server;
+}
+
+// 전역 서버 변수 (graceful shutdown에서 사용)
+let globalServer = null;
+
+// ✅ Graceful shutdown - nodemon 재시작 시 포트 해제 보장
+async function gracefulShutdown(signal) {
+  console.log(`\n[서버] ${signal} 수신, 서버 종료 중...`);
+  console.log(`[서버] 진행 중인 작업: ${activeTasks.size}개`);
+
+  // 진행 중인 작업이 있으면 대기
+  if (activeTasks.size > 0) {
+    console.log(`[서버] 진행 중인 작업 완료 대기 중... (최대 ${MAX_SHUTDOWN_WAIT / 1000}초)`);
+    const startTime = Date.now();
+
+    // 모든 작업이 완료되거나 타임아웃까지 대기
+    while (activeTasks.size > 0 && (Date.now() - startTime) < MAX_SHUTDOWN_WAIT) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (activeTasks.size > 0) {
+        console.log(`[서버] 대기 중... (진행 중: ${activeTasks.size}개, 경과: ${Math.round((Date.now() - startTime) / 1000)}초)`);
+      }
+    }
+
+    if (activeTasks.size > 0) {
+      console.warn(`[서버] 경고: ${activeTasks.size}개 작업이 완료되지 않았습니다. 강제 종료합니다.`);
+    } else {
+      console.log('[서버] 모든 작업이 완료되었습니다.');
+    }
+  }
+
+  // HTTP 서버 종료
+  if (globalServer) {
+    globalServer.close(() => {
+      console.log('[서버] HTTP 서버 종료 완료');
+      process.exit(0);
+    });
+  } else {
+    console.log('[서버] 서버 인스턴스를 찾을 수 없습니다.');
+    process.exit(0);
+  }
+
+  // 추가 안전장치: 5초 후 강제 종료
   setTimeout(() => {
-    console.error('[서버] 강제 종료');
+    console.error('[서버] 강제 종료 (서버 종료 타임아웃)');
     process.exit(1);
   }, 5000);
 }
@@ -1820,10 +2021,21 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // nodemon 전용: SIGUSR2 수신 시 graceful shutdown 후 다시 SIGUSR2 전송
-process.once('SIGUSR2', () => {
+process.once('SIGUSR2', async () => {
   console.log('[서버] nodemon 재시작 감지 (SIGUSR2)');
-  server.close(() => {
-    process.kill(process.pid, 'SIGUSR2');
-  });
+  await gracefulShutdown('SIGUSR2');
+  // gracefulShutdown이 완료되면 nodemon이 자동으로 재시작
+});
+
+// 헬퍼 함수 export (다른 모듈에서 사용 가능하도록)
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports.registerActiveTask = registerActiveTask;
+  module.exports.unregisterActiveTask = unregisterActiveTask;
+}
+
+// ✅ 서버 시작
+startServer().catch((error) => {
+  console.error('[오류] 서버 시작 실패:', error);
+  process.exit(1);
 });
 
