@@ -12,3 +12,12 @@ backend/dist/
 # 인증서 비밀번호 저장소 (보안)
 data/
 
+# 인증서 임시 파일 (보안) - 절대 커밋 금지
+temp/
+*.p12
+*.pfx
+*.pem
+*.key
+*.der
+*.cer
+*.crt
